@@ -24,12 +24,24 @@ export interface CompletedAuth {
 
 // The real upstream token behind an issued opaque access token.
 export interface StoredToken {
-  upstream: UpstreamToken;
+  upstream: UpstreamToken; // upstream.refreshToken is no longer used for refresh; kept for reference (may be undefined)
   clientId: string;
+  sessionId: string;
 }
 
-// The upstream refresh token behind an issued opaque refresh token.
+// Links an issued opaque refresh token to its login session. The upstream
+// refresh token itself lives in the shared SessionRecord, not here, so both the
+// client-facing and server-side refresh paths rotate the same copy.
 export interface RefreshRecord {
+  clientId: string;
+  sessionId: string;
+}
+
+// The single source of truth for a login session's CURRENT upstream refresh
+// token. Both the client-facing refresh (exchangeRefreshToken) and the
+// server-side refresh (sessionTokenProvider) read and write this, so Dex's
+// rotated refresh token is always persisted for the other path.
+export interface SessionRecord {
   upstreamRefreshToken: string;
   clientId: string;
 }
@@ -59,6 +71,11 @@ export interface TokenStore {
   putRefreshToken(opaque: string, value: RefreshRecord): Promise<void>;
   getRefreshToken(opaque: string): Promise<RefreshRecord | undefined>;
   deleteRefreshToken(opaque: string): Promise<void>;
+
+  // Per-login-session upstream refresh token (shared by both refresh paths).
+  putSession(sessionId: string, value: SessionRecord): Promise<void>;
+  getSession(sessionId: string): Promise<SessionRecord | undefined>;
+  deleteSession(sessionId: string): Promise<void>;
 
   // Release resources (timers, connections).
   dispose(): void;

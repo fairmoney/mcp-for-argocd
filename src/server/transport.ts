@@ -8,7 +8,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
 import { resolveAuthMode, loadOidcConfig } from '../auth/config.js';
-import { discoverOidc } from '../auth/oidcDiscovery.js';
+import { discoverOidc, SSONotConfiguredError } from '../auth/oidcDiscovery.js';
+import type { OidcProviderMetadata } from '../auth/types.js';
 import { createTokenStore } from '../auth/tokenStoreFactory.js';
 import { OAuthProxyProvider } from '../auth/oauthProxyProvider.js';
 import { makeSessionTokenProvider } from '../auth/sessionTokenProvider.js';
@@ -97,7 +98,7 @@ const resolveCredentials = (
   return { argocdBaseUrl, argocdApiToken };
 };
 
-export const connectHttpTransport = (port: number, stateless = false) => {
+export const connectHttpTransport = async (port: number, stateless = false) => {
   const app = express();
   app.use(express.json());
 
@@ -110,9 +111,36 @@ export const connectHttpTransport = (port: number, stateless = false) => {
   if (resolveAuthMode() === 'oidc') {
     const config = loadOidcConfig();
     const store = createTokenStore(config);
-    // Cache discovery once; the provider also memoizes internally.
-    const discover = () => discoverOidc(config.argocdBaseUrl);
-    const provider = new OAuthProxyProvider({ config, store, discover });
+
+    // Resolve OIDC discovery ONCE at startup and fail closed. Starting the
+    // server against an ArgoCD instance that has no SSO configured would leave
+    // every /mcp request unauthenticatable, so we refuse to start instead.
+    let meta: OidcProviderMetadata;
+    try {
+      meta = await discoverOidc(config.argocdBaseUrl);
+    } catch (err) {
+      if (err instanceof SSONotConfiguredError) {
+        logger.error(
+          { argocdBaseUrl: config.argocdBaseUrl },
+          'ArgoCD SSO is not configured; cannot start in oidc mode'
+        );
+      } else {
+        logger.error(
+          { error: err instanceof Error ? err.message : String(err) },
+          'Failed to discover ArgoCD OIDC configuration at startup'
+        );
+      }
+      process.exit(1);
+    }
+
+    // Reuse the one resolved metadata everywhere: the provider gets it via a
+    // resolved-promise discover(), and sessions read the same local. No
+    // per-session rediscovery.
+    const provider = new OAuthProxyProvider({
+      config,
+      store,
+      discover: async () => meta
+    });
 
     // OAuth 2.1 metadata + endpoints (/.well-known/*, /authorize, /token, /register).
     app.use(
@@ -146,51 +174,64 @@ export const connectHttpTransport = (port: number, stateless = false) => {
     const bearerAuth = requireBearerAuth({ verifier: provider });
 
     app.post('/mcp', bearerAuth, async (req, res) => {
-      const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
-      let transport: StreamableHTTPServerTransport;
+      try {
+        const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
+        let transport: StreamableHTTPServerTransport;
 
-      if (!stateless && sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
-        transport = httpTransports[sessionIdFromHeader];
-      } else if (stateless || (!sessionIdFromHeader && isInitializeRequest(req.body))) {
-        const opaque = req.auth!.token; // set by requireBearerAuth
-        const meta = await discover();
-        const tokenSource = makeSessionTokenProvider(store, meta, config, opaque);
+        if (!stateless && sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
+          transport = httpTransports[sessionIdFromHeader];
+        } else if (stateless || (!sessionIdFromHeader && isInitializeRequest(req.body))) {
+          const opaque = req.auth!.token; // set by requireBearerAuth
+          const tokenSource = makeSessionTokenProvider(store, meta, config, opaque);
 
-        transport = new StreamableHTTPServerTransport(
-          stateless
-            ? { sessionIdGenerator: undefined }
-            : {
-                sessionIdGenerator: () => randomUUID(),
-                onsessioninitialized: (id) => {
-                  httpTransports[id] = transport;
+          transport = new StreamableHTTPServerTransport(
+            stateless
+              ? { sessionIdGenerator: undefined }
+              : {
+                  sessionIdGenerator: () => randomUUID(),
+                  onsessioninitialized: (id) => {
+                    httpTransports[id] = transport;
+                  }
                 }
-              }
-        );
-        if (!stateless) {
-          transport.onclose = () => {
-            if (transport.sessionId) delete httpTransports[transport.sessionId];
-          };
-        }
+          );
+          if (!stateless) {
+            transport.onclose = () => {
+              if (transport.sessionId) delete httpTransports[transport.sessionId];
+            };
+          }
 
-        const server = createServer({
-          argocdBaseUrl: config.argocdBaseUrl,
-          argocdApiToken: '',
-          pinBaseUrl: true,
-          tokenSource
-        });
-        await server.connect(transport);
-      } else {
-        const errorMsg = sessionIdFromHeader
-          ? `Invalid or expired session ID: ${sessionIdFromHeader}`
-          : 'Bad Request: Not an initialization request and no valid session ID provided.';
-        res.status(400).json({
-          jsonrpc: '2.0',
-          error: { code: -32000, message: errorMsg },
-          id: req.body?.id !== undefined ? req.body.id : null
-        });
-        return;
+          const server = createServer({
+            argocdBaseUrl: config.argocdBaseUrl,
+            argocdApiToken: '',
+            pinBaseUrl: true,
+            tokenSource
+          });
+          await server.connect(transport);
+        } else {
+          const errorMsg = sessionIdFromHeader
+            ? `Invalid or expired session ID: ${sessionIdFromHeader}`
+            : 'Bad Request: Not an initialization request and no valid session ID provided.';
+          res.status(400).json({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: errorMsg },
+            id: req.body?.id !== undefined ? req.body.id : null
+          });
+          return;
+        }
+        await transport.handleRequest(req, res, req.body);
+      } catch (error) {
+        logger.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          'oidc /mcp request handler failed'
+        );
+        if (!res.headersSent) {
+          res.status(500).json({
+            jsonrpc: '2.0',
+            error: { code: -32603, message: 'Internal error' },
+            id: req.body?.id ?? null
+          });
+        }
       }
-      await transport.handleRequest(req, res, req.body);
     });
 
     app.get('/mcp', (_req, res) => {

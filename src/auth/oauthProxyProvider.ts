@@ -171,21 +171,28 @@ export class OAuthProxyProvider implements OAuthServerProvider {
     const completed = await this.store.takeAuthCode(authorizationCode);
     if (!completed) throw new Error('Unknown or expired authorization code');
 
+    const sessionId = generateOpaqueToken();
     const opaqueAccess = generateOpaqueToken();
     const opaqueRefresh = completed.upstream.refreshToken ? generateOpaqueToken() : undefined;
     const ttlSec = completed.upstream.expiresAtMs
       ? Math.max(1, Math.floor((completed.upstream.expiresAtMs - Date.now()) / 1000))
       : undefined;
 
-    await this.store.putAccessToken(
-      opaqueAccess,
-      { upstream: completed.upstream, clientId: client.client_id },
-      ttlSec
-    );
-    if (opaqueRefresh && completed.upstream.refreshToken) {
-      await this.store.putRefreshToken(opaqueRefresh, {
+    if (completed.upstream.refreshToken) {
+      await this.store.putSession(sessionId, {
         upstreamRefreshToken: completed.upstream.refreshToken,
         clientId: client.client_id
+      });
+    }
+    await this.store.putAccessToken(
+      opaqueAccess,
+      { upstream: completed.upstream, clientId: client.client_id, sessionId },
+      ttlSec
+    );
+    if (opaqueRefresh) {
+      await this.store.putRefreshToken(opaqueRefresh, {
+        clientId: client.client_id,
+        sessionId
       });
     }
 
@@ -203,6 +210,8 @@ export class OAuthProxyProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const record = await this.store.getRefreshToken(refreshToken);
     if (!record) throw new Error('Unknown or expired refresh token');
+    const session = await this.store.getSession(record.sessionId);
+    if (!session) throw new Error('No upstream refresh token available for this session');
     const meta = await this.meta();
 
     const upstream = await refreshUpstream(
@@ -210,10 +219,19 @@ export class OAuthProxyProvider implements OAuthServerProvider {
       {
         clientId: this.config.clientId,
         clientSecret: this.config.clientSecret,
-        refreshToken: record.upstreamRefreshToken
+        refreshToken: session.upstreamRefreshToken
       },
       this.fetchImpl
     );
+
+    // Persist Dex's rotated refresh token in the shared session record so the
+    // server-side path (sessionTokenProvider) picks it up instead of a stale one.
+    if (upstream.refreshToken) {
+      await this.store.putSession(record.sessionId, {
+        upstreamRefreshToken: upstream.refreshToken,
+        clientId: session.clientId
+      });
+    }
 
     const opaqueAccess = generateOpaqueToken();
     const opaqueRefresh = upstream.refreshToken ? generateOpaqueToken() : undefined;
@@ -221,12 +239,21 @@ export class OAuthProxyProvider implements OAuthServerProvider {
       ? Math.max(1, Math.floor((upstream.expiresAtMs - Date.now()) / 1000))
       : undefined;
 
-    await this.store.putAccessToken(opaqueAccess, { upstream, clientId: client.client_id }, ttlSec);
+    await this.store.putAccessToken(
+      opaqueAccess,
+      { upstream, clientId: client.client_id, sessionId: record.sessionId },
+      ttlSec
+    );
+    // The consumed opaque refresh token is single-use: delete it so it cannot be
+    // replayed. The previously issued opaque ACCESS token is intentionally NOT
+    // deleted here — a long-lived server-side session (stateful mode) may still
+    // hold it, and it refreshes its upstream token in place via the shared
+    // session record; that access token expires on its own TTL.
     await this.store.deleteRefreshToken(refreshToken);
-    if (opaqueRefresh && upstream.refreshToken) {
+    if (opaqueRefresh) {
       await this.store.putRefreshToken(opaqueRefresh, {
-        upstreamRefreshToken: upstream.refreshToken,
-        clientId: client.client_id
+        clientId: client.client_id,
+        sessionId: record.sessionId
       });
     }
 

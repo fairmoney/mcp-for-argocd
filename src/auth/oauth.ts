@@ -39,11 +39,16 @@ interface TokenResponse {
   id_token?: string;
 }
 
+// Fallback lifetime when the provider omits expires_in. Populating expiresAtMs
+// unconditionally guarantees the SDK's requireBearerAuth never sees an
+// undefined AuthInfo.expiresAt (which it treats as an error and 401s on).
+const DEFAULT_UPSTREAM_TTL_SEC = 3600;
+
 const toUpstreamToken = (r: TokenResponse): UpstreamToken => ({
   accessToken: r.access_token,
   refreshToken: r.refresh_token,
   idToken: r.id_token,
-  expiresAtMs: r.expires_in ? Date.now() + r.expires_in * 1000 : undefined
+  expiresAtMs: Date.now() + (r.expires_in ?? DEFAULT_UPSTREAM_TTL_SEC) * 1000
 });
 
 const postToken = async (

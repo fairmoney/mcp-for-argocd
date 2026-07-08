@@ -4,7 +4,8 @@ import type {
   PendingAuth,
   CompletedAuth,
   StoredToken,
-  RefreshRecord
+  RefreshRecord,
+  SessionRecord
 } from './tokenStore.js';
 
 interface Expiring<T> {
@@ -21,6 +22,8 @@ export class InMemoryTokenStore implements TokenStore {
   private codes = new Map<string, Expiring<CompletedAuth>>();
   private access = new Map<string, Expiring<StoredToken>>();
   private refresh = new Map<string, Expiring<RefreshRecord>>();
+  // Sessions live as long as the refresh chain; no TTL and no sweep.
+  private sessions = new Map<string, SessionRecord>();
   private sweep: ReturnType<typeof setInterval>;
 
   constructor() {
@@ -97,6 +100,16 @@ export class InMemoryTokenStore implements TokenStore {
   }
   async deleteRefreshToken(opaque: string): Promise<void> {
     this.refresh.delete(opaque);
+  }
+
+  async putSession(sessionId: string, value: SessionRecord): Promise<void> {
+    this.sessions.set(sessionId, value);
+  }
+  async getSession(sessionId: string): Promise<SessionRecord | undefined> {
+    return this.sessions.get(sessionId);
+  }
+  async deleteSession(sessionId: string): Promise<void> {
+    this.sessions.delete(sessionId);
   }
 
   dispose(): void {

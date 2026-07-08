@@ -4,7 +4,8 @@ import type {
   PendingAuth,
   CompletedAuth,
   StoredToken,
-  RefreshRecord
+  RefreshRecord,
+  SessionRecord
 } from './tokenStore.js';
 import { plainCodec, type ValueCodec } from './encryption.js';
 
@@ -25,7 +26,8 @@ const K = {
   pending: (s: string) => `${NS}:pending:${s}`,
   code: (c: string) => `${NS}:code:${c}`,
   access: (o: string) => `${NS}:access:${o}`,
-  refresh: (o: string) => `${NS}:refresh:${o}`
+  refresh: (o: string) => `${NS}:refresh:${o}`,
+  session: (id: string) => `${NS}:session:${id}`
 };
 
 // Redis-backed TokenStore. Key TTL is native (SET ... EX), so no sweep is
@@ -102,6 +104,18 @@ export class RedisTokenStore implements TokenStore {
   }
   async deleteRefreshToken(opaque: string): Promise<void> {
     await this.redis.del(K.refresh(opaque));
+  }
+
+  // No TTL: the session record must outlive the access token so it can drive
+  // the next refresh for the whole login-session lifetime.
+  async putSession(sessionId: string, value: SessionRecord): Promise<void> {
+    await this.putJson(K.session(sessionId), value);
+  }
+  async getSession(sessionId: string): Promise<SessionRecord | undefined> {
+    return this.getJson<SessionRecord>(K.session(sessionId));
+  }
+  async deleteSession(sessionId: string): Promise<void> {
+    await this.redis.del(K.session(sessionId));
   }
 
   dispose(): void {

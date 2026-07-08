@@ -43,7 +43,8 @@ export const runTokenStoreContract = (name: string, makeStore: () => TokenStore)
     t.after(() => store.dispose());
     await store.putAccessToken('opaque1', {
       upstream: { accessToken: 'A', refreshToken: 'R', expiresAtMs: 1_000_000 },
-      clientId: 'abc'
+      clientId: 'abc',
+      sessionId: 'sess1'
     });
     const got = await store.getAccessToken('opaque1');
     assert.equal(got?.upstream.accessToken, 'A');
@@ -54,9 +55,21 @@ export const runTokenStoreContract = (name: string, makeStore: () => TokenStore)
   test(`[${name}] refresh token round-trips and deletes`, async (t) => {
     const store = makeStore();
     t.after(() => store.dispose());
-    await store.putRefreshToken('r1', { upstreamRefreshToken: 'UR', clientId: 'abc' });
-    assert.equal((await store.getRefreshToken('r1'))?.upstreamRefreshToken, 'UR');
+    await store.putRefreshToken('r1', { clientId: 'abc', sessionId: 'sess1' });
+    assert.equal((await store.getRefreshToken('r1'))?.sessionId, 'sess1');
+    assert.equal((await store.getRefreshToken('r1'))?.clientId, 'abc');
     await store.deleteRefreshToken('r1');
     assert.equal(await store.getRefreshToken('r1'), undefined);
+  });
+
+  test(`[${name}] session record round-trips and deletes`, async (t) => {
+    const store = makeStore();
+    t.after(() => store.dispose());
+    await store.putSession('sess1', { upstreamRefreshToken: 'UR', clientId: 'abc' });
+    const got = await store.getSession('sess1');
+    assert.equal(got?.upstreamRefreshToken, 'UR');
+    assert.equal(got?.clientId, 'abc');
+    await store.deleteSession('sess1');
+    assert.equal(await store.getSession('sess1'), undefined);
   });
 };

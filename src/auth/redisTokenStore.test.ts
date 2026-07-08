@@ -20,7 +20,8 @@ test('[redis+aes] stored value is not plaintext in Redis', async (t) => {
   t.after(() => store.dispose());
   await store.putAccessToken('opaqueX', {
     upstream: { accessToken: 'SUPER_SECRET_JWT' },
-    clientId: 'abc'
+    clientId: 'abc',
+    sessionId: 'sessX'
   });
   const raw = (await redis.get('argocd-mcp:access:opaqueX')) ?? '';
   assert.ok(!raw.includes('SUPER_SECRET_JWT'), 'raw Redis value must be encrypted');
