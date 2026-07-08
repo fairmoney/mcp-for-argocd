@@ -12,6 +12,7 @@ import { plainCodec, type ValueCodec } from './encryption.js';
 // ioredis-mock without a type dependency on the concrete client.
 export interface RedisLike {
   get(key: string): Promise<string | null>;
+  getdel(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<unknown>;
   set(key: string, value: string, mode: 'EX', ttlSec: number): Promise<unknown>;
   del(key: string): Promise<unknown>;
@@ -52,10 +53,14 @@ export class RedisTokenStore implements TokenStore {
     return JSON.parse(this.codec.decode(raw)) as T;
   }
 
+  // Atomic get-and-delete via Redis GETDEL: the read and the delete are a single
+  // command, so concurrent callers (e.g. two replicas racing on the same OAuth
+  // callback) cannot both observe the value. This preserves the single-use
+  // invariant that authorization codes and pending-auth state depend on.
   private async take<T>(key: string): Promise<T | undefined> {
-    const v = await this.getJson<T>(key);
-    if (v !== undefined) await this.redis.del(key);
-    return v;
+    const raw = await this.redis.getdel(key);
+    if (raw === null) return undefined;
+    return JSON.parse(this.codec.decode(raw)) as T;
   }
 
   async putClient(client: OAuthClientInformationFull): Promise<void> {
