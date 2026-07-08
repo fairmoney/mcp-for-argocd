@@ -58,6 +58,18 @@ test('loadOidcConfig rejects a non-https public URL', () => {
   }
 });
 
+test('loadOidcConfig rejects a malformed ARGOCD_BASE_URL', () => {
+  const { path, cleanup } = withSecretFile('s');
+  try {
+    assert.throws(
+      () => loadOidcConfig({ ...validEnv(path), ARGOCD_BASE_URL: 'not a url' }),
+      /ARGOCD_BASE_URL/
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('loadOidcConfig requires REDIS_URL when TOKEN_STORE=redis', () => {
   const { path, cleanup } = withSecretFile('s');
   try {

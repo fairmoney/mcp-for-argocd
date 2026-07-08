@@ -56,8 +56,19 @@ export const loadOidcConfig = (env: NodeJS.ProcessEnv = process.env): OidcConfig
     throw new Error(`MCP_PUBLIC_URL must use https (got "${publicUrl.protocol}")`);
   }
 
-  const argocdBaseUrl = stripTrailingSlashes((env.ARGOCD_BASE_URL ?? '').trim());
-  if (!argocdBaseUrl) throw new Error('oidc mode requires ARGOCD_BASE_URL');
+  const argocdBaseUrlRaw = (env.ARGOCD_BASE_URL ?? '').trim();
+  if (!argocdBaseUrlRaw) throw new Error('oidc mode requires ARGOCD_BASE_URL');
+  let argocdUrl: URL;
+  try {
+    argocdUrl = new URL(argocdBaseUrlRaw);
+  } catch {
+    throw new Error(`ARGOCD_BASE_URL is not a valid URL: "${argocdBaseUrlRaw}"`);
+  }
+  // ArgoCD may be reached over either http (in-cluster) or https.
+  if (argocdUrl.protocol !== 'http:' && argocdUrl.protocol !== 'https:') {
+    throw new Error(`ARGOCD_BASE_URL must use http or https (got "${argocdUrl.protocol}")`);
+  }
+  const argocdBaseUrl = stripTrailingSlashes(argocdBaseUrlRaw);
 
   const clientId = (env.ARGOCD_MCP_OIDC_CLIENT_ID ?? '').trim();
   if (!clientId) throw new Error('oidc mode requires ARGOCD_MCP_OIDC_CLIENT_ID');
