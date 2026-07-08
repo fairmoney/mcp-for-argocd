@@ -1,0 +1,63 @@
+# Minimal in-cluster deployment of the MCP server in oidc mode behind an ingress,
+# with a Redis-backed token store for horizontal scaling.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-mcp
+  namespace: argocd
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: argocd-mcp }
+  template:
+    metadata:
+      labels: { app: argocd-mcp }
+    spec:
+      containers:
+        - name: argocd-mcp
+          image: ghcr.io/argoproj-labs/argocd-mcp:latest
+          args: ['http']
+          ports: [{ containerPort: 3000 }]
+          env:
+            - { name: AUTH_MODE, value: oidc }
+            - { name: MCP_PUBLIC_URL, value: https://argocd-mcp.example.com }
+            - { name: ARGOCD_BASE_URL, value: https://argocd-server.argocd.svc }
+            - { name: ARGOCD_MCP_OIDC_CLIENT_ID, value: argocd-mcp }
+            - { name: ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE, value: /secrets/oidc/clientSecret }
+            - { name: TOKEN_STORE, value: redis }
+            - { name: REDIS_URL, value: redis://argocd-mcp-redis:6379 }
+          volumeMounts:
+            - { name: oidc-secret, mountPath: /secrets/oidc, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 3000 }
+      volumes:
+        - name: oidc-secret
+          secret:
+            secretName: argocd-mcp-oidc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-mcp
+  namespace: argocd
+spec:
+  selector: { app: argocd-mcp }
+  ports: [{ port: 80, targetPort: 3000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd-mcp
+  namespace: argocd
+spec:
+  tls:
+    - hosts: [argocd-mcp.example.com]
+      secretName: argocd-mcp-tls
+  rules:
+    - host: argocd-mcp.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: argocd-mcp, port: { number: 80 } }

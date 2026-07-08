@@ -277,6 +277,34 @@ In stateless mode:
 
 This mode is recommended for Kubernetes deployments with Horizontal Pod Autoscaling (HPA) where network-level sticky sessions are not available.
 
+### SSO (oidc) Mode
+
+ArgoCD MCP supports federated authentication via ArgoCD's Dex OIDC provider. In oidc mode, the server runs as an HTTP service behind an Ingress and exchanges authorization codes with Dex for access tokens, eliminating the need for static API tokens. This mode is opt-in and is enabled by setting `AUTH_MODE=oidc`.
+
+**Browser OAuth flow:**
+When a client initiates a session, the server redirects to Dex for user authentication. Dex authenticates the user against your upstream identity provider (LDAP, GitHub, SAML, etc.) and returns an authorization code to the MCP server's callback endpoint (`https://<mcp-ingress>/oauth/callback`). The server exchanges this code for an access token at Dex's token endpoint using a pre-registered confidential client. The token is stored (in memory or Redis) and refreshed on-demand, ensuring seamless authentication without exposing Dex credentials to the user.
+
+**Environment variables:**
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `AUTH_MODE` | No | `token` | Set to `oidc` to enable SSO mode. |
+| `MCP_PUBLIC_URL` | Yes* | — | Public HTTPS URL of the MCP server (e.g., `https://argocd-mcp.example.com`). Must be HTTPS; used to construct the OAuth callback URL. |
+| `ARGOCD_BASE_URL` | Yes* | — | ArgoCD server URL (http or https); used for token validation. |
+| `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | OIDC client ID registered with Dex (default: `argocd-mcp`). |
+| `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE` | Yes* | — | Path to a file containing the OIDC client secret (e.g., `/secrets/oidc/clientSecret`). |
+| `TOKEN_STORE` | No | `memory` | Token storage: `memory` (single-replica) or `redis` (horizontally scalable; requires Redis >= 6.2). |
+| `REDIS_URL` | No | — | Redis connection URL (required if `TOKEN_STORE=redis`). |
+| `TOKEN_STORE_ENCRYPTION_KEY_FILE` | No | — | Path to a 32-byte AES-256 key file for at-rest token encryption (optional). |
+
+**\* Required when `AUTH_MODE=oidc`; not used in token mode.*
+
+**Single-replica in-memory store:** If using `TOKEN_STORE=memory` (the default), set `replicas: 1` in the Deployment spec — multiple replicas without sticky sessions will cause inconsistent state and 400 errors.
+
+**Multi-replica Redis store (production):** For horizontally scalable deployments, set `TOKEN_STORE=redis` and point `REDIS_URL` to a managed or in-cluster Redis instance (version >= 6.2 required for atomic `GETDEL` operations).
+
+For full deployment instructions, see [`deploy/README.md`](deploy/README.md).
+
 ## For Development
 
 1. Clone the repository:
