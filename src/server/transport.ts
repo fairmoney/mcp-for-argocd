@@ -7,6 +7,13 @@ import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
+import { resolveAuthMode, loadOidcConfig } from '../auth/config.js';
+import { discoverOidc } from '../auth/oidcDiscovery.js';
+import { createTokenStore } from '../auth/tokenStoreFactory.js';
+import { OAuthProxyProvider } from '../auth/oauthProxyProvider.js';
+import { makeSessionTokenProvider } from '../auth/sessionTokenProvider.js';
+import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 
 // Load the base-URL -> token registry once at startup from the JSON file at
 // ARGOCD_TOKEN_REGISTRY_PATH. Shared across all connections; read-only after
@@ -100,6 +107,108 @@ export const connectHttpTransport = (port: number, stateless = false) => {
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
+  if (resolveAuthMode() === 'oidc') {
+    const config = loadOidcConfig();
+    const store = createTokenStore(config);
+    // Cache discovery once; the provider also memoizes internally.
+    const discover = () => discoverOidc(config.argocdBaseUrl);
+    const provider = new OAuthProxyProvider({ config, store, discover });
+
+    // OAuth 2.1 metadata + endpoints (/.well-known/*, /authorize, /token, /register).
+    app.use(
+      mcpAuthRouter({
+        provider,
+        issuerUrl: new URL(config.publicUrl),
+        baseUrl: new URL(config.publicUrl)
+      })
+    );
+
+    // The Dex redirect lands here (registered as the static client redirectURI).
+    app.get(config.callbackPath, async (req, res) => {
+      const code = req.query.code as string | undefined;
+      const state = req.query.state as string | undefined;
+      if (!code || !state) {
+        res.status(400).send('Missing code or state');
+        return;
+      }
+      try {
+        const redirect = await provider.handleUpstreamCallback(code, state);
+        res.redirect(redirect);
+      } catch (error) {
+        logger.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          'OAuth callback failed'
+        );
+        res.status(400).send('Authentication failed');
+      }
+    });
+
+    const bearerAuth = requireBearerAuth({ verifier: provider });
+
+    app.post('/mcp', bearerAuth, async (req, res) => {
+      const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
+      let transport: StreamableHTTPServerTransport;
+
+      if (!stateless && sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
+        transport = httpTransports[sessionIdFromHeader];
+      } else if (stateless || (!sessionIdFromHeader && isInitializeRequest(req.body))) {
+        const opaque = req.auth!.token; // set by requireBearerAuth
+        const meta = await discover();
+        const tokenSource = makeSessionTokenProvider(store, meta, config, opaque);
+
+        transport = new StreamableHTTPServerTransport(
+          stateless
+            ? { sessionIdGenerator: undefined }
+            : {
+                sessionIdGenerator: () => randomUUID(),
+                onsessioninitialized: (id) => {
+                  httpTransports[id] = transport;
+                }
+              }
+        );
+        if (!stateless) {
+          transport.onclose = () => {
+            if (transport.sessionId) delete httpTransports[transport.sessionId];
+          };
+        }
+
+        const server = createServer({
+          argocdBaseUrl: config.argocdBaseUrl,
+          argocdApiToken: '',
+          pinBaseUrl: true,
+          tokenSource
+        });
+        await server.connect(transport);
+      } else {
+        const errorMsg = sessionIdFromHeader
+          ? `Invalid or expired session ID: ${sessionIdFromHeader}`
+          : 'Bad Request: Not an initialization request and no valid session ID provided.';
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: errorMsg },
+          id: req.body?.id !== undefined ? req.body.id : null
+        });
+        return;
+      }
+      await transport.handleRequest(req, res, req.body);
+    });
+
+    app.get('/mcp', (_req, res) => {
+      res.status(405).send('Method Not Allowed');
+    });
+    app.delete('/mcp', (_req, res) => {
+      res.status(405).send('Method Not Allowed');
+    });
+
+    logger.info(
+      { port, argocdBaseUrl: config.argocdBaseUrl, tokenStore: config.tokenStore },
+      `Connecting to Http Stream transport on port: ${port} (oidc auth mode)`
+    );
+    app.listen(port);
+    return;
+  }
+
+  // ---- token mode (existing behavior, unchanged) ----
   app.post('/mcp', async (req, res) => {
     const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
     let transport: StreamableHTTPServerTransport;

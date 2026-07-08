@@ -10,6 +10,7 @@ import {
   ResourceRefSchema
 } from '../shared/models/schema.js';
 import { TokenRegistry, tokenRegistryFromEnv } from './tokenRegistry.js';
+import { type TokenSource } from '../argocd/http.js';
 
 type ServerInfo = {
   argocdBaseUrl: string;
@@ -17,6 +18,13 @@ type ServerInfo = {
   // Optional registry mapping additional ArgoCD base URLs to their tokens. When
   // omitted, it is loaded from the ARGOCD_TOKEN_REGISTRY_PATH env var.
   tokenRegistry?: TokenRegistry;
+  // When true (oidc mode), ignore the per-call argocdBaseUrl argument and
+  // always target argocdBaseUrl. Prevents a caller (or a prompt-injected
+  // model) from redirecting a user's ArgoCD token to an arbitrary host.
+  pinBaseUrl?: boolean;
+  // When set (oidc mode), build the ArgoCD client with this refreshable
+  // bearer-token source instead of the static argocdApiToken string.
+  tokenSource?: TokenSource;
 };
 
 // Per-call argument that any tool may accept to target a specific ArgoCD
@@ -45,6 +53,9 @@ export class Server extends McpServer {
   private defaultApiToken: string;
   private tokenRegistry: TokenRegistry;
   private argocdClient: ArgoCDClient;
+  // See ServerInfo.pinBaseUrl / ServerInfo.tokenSource.
+  private pinBaseUrl: boolean;
+  private tokenSource: TokenSource;
   // Cache per-credential clients to avoid rebuilding the HttpClient on every
   // call. Keyed by baseUrl + token, since the same base URL may resolve to
   // different tokens (request token vs. registry token vs. default).
@@ -58,7 +69,9 @@ export class Server extends McpServer {
     this.defaultBaseUrl = serverInfo.argocdBaseUrl;
     this.defaultApiToken = serverInfo.argocdApiToken;
     this.tokenRegistry = serverInfo.tokenRegistry ?? tokenRegistryFromEnv();
-    this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
+    this.pinBaseUrl = serverInfo.pinBaseUrl ?? false;
+    this.tokenSource = serverInfo.tokenSource ?? serverInfo.argocdApiToken;
+    this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, this.tokenSource);
 
     const isReadOnly =
       String(process.env.MCP_READ_ONLY ?? '')
@@ -389,6 +402,17 @@ export class Server extends McpServer {
   // own token, without the token ever appearing in a tool-call payload: callers
   // pass only the (non-secret) base URL and the server pairs it with the token.
   private resolveClient(args: ArgoCDArgs): ArgoCDClient {
+    // In oidc mode the base URL is pinned to the configured default and the
+    // per-call override is ignored (a user's token must never be redirected to
+    // an arbitrary host). The token comes from the refreshable session source
+    // already wired into this.argocdClient in the constructor.
+    if (this.pinBaseUrl) {
+      if (!this.defaultBaseUrl) {
+        throw new Error('oidc mode requires a configured ARGOCD_BASE_URL');
+      }
+      return this.argocdClient;
+    }
+
     const baseUrl = args.argocdBaseUrl || this.defaultBaseUrl;
 
     // The base URL is optional at the session level; when no default is
