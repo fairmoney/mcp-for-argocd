@@ -291,7 +291,7 @@ When a client initiates a session, the server redirects to Dex for user authenti
 | `AUTH_MODE` | No | `token` | Set to `oidc` to enable SSO mode. |
 | `MCP_PUBLIC_URL` | Yes* | — | Public HTTPS URL of the MCP server (e.g., `https://argocd-mcp.example.com`). Must be HTTPS; used to construct the OAuth callback URL. |
 | `ARGOCD_BASE_URL` | Yes* | — | ArgoCD server URL (http or https); used for token validation. |
-| `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | OIDC client ID registered with Dex (default: `argocd-mcp`). |
+| `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | OIDC client ID registered with Dex. No default (required in oidc mode); conventional/example value: `argocd-mcp`. |
 | `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE` | Yes* | — | Path to a file containing the OIDC client secret (e.g., `/secrets/oidc/clientSecret`). |
 | `TOKEN_STORE` | No | `memory` | Token storage: `memory` (single-replica) or `redis` (horizontally scalable; requires Redis >= 6.2). |
 | `REDIS_URL` | No | — | Redis connection URL (required if `TOKEN_STORE=redis`). |

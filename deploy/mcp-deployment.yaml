@@ -15,7 +15,8 @@ spec:
     spec:
       containers:
         - name: argocd-mcp
-          image: ghcr.io/argoproj-labs/argocd-mcp:latest
+          # Published image. Alternative registry: quay.io/argoprojlabs/mcp-for-argocd:latest
+          image: ghcr.io/argoproj-labs/mcp-for-argocd:latest
           args: ['http']
           ports: [{ containerPort: 3000 }]
           env:

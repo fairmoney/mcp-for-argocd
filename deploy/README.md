@@ -13,13 +13,24 @@ This guide explains how to deploy the argocd-mcp server in SSO mode, where authe
 
 ### Step 1: Create the Client Secret
 
-Generate or obtain your MCP server's OIDC client secret (a random string; 32+ characters recommended). Create a Kubernetes Secret in the `argocd` namespace:
+Generate or obtain your MCP server's OIDC client secret (a random string; 32+ characters recommended). This **one secret value** must be stored in **two places**, and they must carry the **identical value**:
 
-```bash
-kubectl create secret generic argocd-mcp-oidc \
-  --from-literal=clientSecret=<your-client-secret> \
-  -n argocd
-```
+1. **`argocd-mcp-oidc` Secret** — mounted into the MCP pod and read via `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE`:
+
+   ```bash
+   kubectl create secret generic argocd-mcp-oidc \
+     --from-literal=clientSecret=<your-client-secret> \
+     -n argocd
+   ```
+
+2. **`argocd-secret` Secret** — consumed by Dex to resolve the `$oidc.argocd-mcp.clientSecret` reference in the static client config (see Step 2). Patch the existing `argocd-secret` to add the same value under the `oidc.argocd-mcp.clientSecret` key:
+
+   ```bash
+   kubectl -n argocd patch secret argocd-secret \
+     -p '{"stringData":{"oidc.argocd-mcp.clientSecret":"<SAME value as the argocd-mcp-oidc Secret>"}}'
+   ```
+
+> **Both secrets must carry the identical value.** `argocd-secret` is read by Dex when it validates the client during the token exchange; `argocd-mcp-oidc` is mounted into the MCP pod and presented by the MCP server during that same exchange. If they differ, the token exchange fails with an invalid-client error.
 
 ### Step 2: Register the MCP Server as a Dex Static Client
 
@@ -34,6 +45,8 @@ kubectl patch configmap argocd-cm -n argocd -p '{
   }
 }'
 ```
+
+> **Warning: patching `data.dex.config` REPLACES the entire value.** The `... your existing dex.config ...` placeholder above is not literal — you must substitute your current, complete `dex.config` (including all existing `connectors:`) and merely append the `staticClients` entry. Running the command verbatim will wipe your existing ArgoCD SSO configuration. Prefer `kubectl edit configmap argocd-cm -n argocd` to edit the value in place, and keep the backup produced by the first line above.
 
 Once the ConfigMap is updated, Dex will automatically reload and register the new static client.
 
@@ -106,19 +119,21 @@ Edit `claude_desktop_config.json`:
 
 ### Claude Code
 
-In an interactive Claude Code session, use the `/mcp connect` command:
+Add the server from your shell with the `claude mcp add` command:
+```bash
+claude mcp add --transport http argocd-mcp https://argocd-mcp.example.com/mcp
 ```
-/mcp connect https://argocd-mcp.example.com/mcp
-```
+
+The browser-based SSO flow opens automatically on the first tool use, prompting you to authenticate with Dex.
 
 ## Environment Variables Reference
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `AUTH_MODE` | No | `token` | Set to `oidc` to enable SSO mode. |
-| `MCP_PUBLIC_URL` | Yes* | — | The public HTTPS URL where the MCP server is accessed (e.g., `https://argocd-mcp.example.com`). Used to construct the OAuth callback URL. Must use HTTPS and have no trailing slash. |
-| `ARGOCD_BASE_URL` | Yes* | — | The URL of the ArgoCD server (http or https). Used for token validation and API calls. No trailing slash. |
-| `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | The OIDC client ID registered with Dex (default: `argocd-mcp`). |
+| `MCP_PUBLIC_URL` | Yes* | — | The public HTTPS URL where the MCP server is accessed (e.g., `https://argocd-mcp.example.com`). Used to construct the OAuth callback URL. Must use HTTPS; trailing slashes are stripped automatically. |
+| `ARGOCD_BASE_URL` | Yes* | — | The URL of the ArgoCD server (http or https). Used for token validation and API calls. Trailing slashes are stripped automatically. |
+| `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | The OIDC client ID registered with Dex. No default (required in oidc mode); conventional/example value: `argocd-mcp`. |
 | `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE` | Yes* | — | Path to a file containing the OIDC client secret (e.g., `/secrets/oidc/clientSecret`). |
 | `TOKEN_STORE` | No | `memory` | Token storage backend: `memory` (single-replica only) or `redis` (horizontally scalable). |
 | `REDIS_URL` | No | — | Redis connection URL (e.g., `redis://localhost:6379`). Required if `TOKEN_STORE=redis`. |
