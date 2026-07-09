@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "description": "Argo CD MCP Server",
   "packageManager": "pnpm@10.34.1",
+  "engines": {
+    "node": ">=24"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/argoproj-labs/mcp-for-argocd.git"
