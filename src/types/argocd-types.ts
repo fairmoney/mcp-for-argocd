@@ -15,3 +15,4 @@ export type ApplicationApplicationResponse = ArgoCD.ApplicationApplicationRespon
 export type ApplicationOperationTerminateResponse = ArgoCD.ApplicationOperationTerminateResponse;
 export type V1alpha1Cluster = ArgoCD.V1alpha1Cluster;
 export type V1alpha1ClusterList = ArgoCD.V1alpha1ClusterList;
+export type V1alpha1AppProject = ArgoCD.V1alpha1AppProject;
