@@ -98,8 +98,29 @@ const resolveCredentials = (
   return { argocdBaseUrl, argocdApiToken };
 };
 
+// Number of reverse-proxy hops in front of this server. Behind a Kubernetes
+// ingress the X-Forwarded-For header is present; Express must be told to trust
+// it or express-rate-limit (used by the OAuth router) throws
+// ERR_ERL_UNEXPECTED_X_FORWARDED_FOR. Default 1 (single ingress); set
+// TRUST_PROXY_HOPS higher for stacked proxies (e.g. ALB + nginx = 2), or 0 to
+// disable trust for direct exposure. Fails closed on a malformed value.
+export const resolveTrustProxy = (env: NodeJS.ProcessEnv = process.env): number => {
+  const raw = (env.TRUST_PROXY_HOPS ?? '').trim();
+  if (!raw) return 1;
+  const hops = Number(raw);
+  if (!Number.isInteger(hops) || hops < 0) {
+    throw new Error(
+      `Invalid TRUST_PROXY_HOPS "${env.TRUST_PROXY_HOPS}": expected a non-negative integer`
+    );
+  }
+  return hops;
+};
+
 export const connectHttpTransport = async (port: number, stateless = false) => {
   const app = express();
+  // Trust the ingress/proxy chain so forwarded client IPs are honored and the
+  // OAuth router's rate limiter can key on the real client rather than throwing.
+  app.set('trust proxy', resolveTrustProxy());
   app.use(express.json());
 
   app.get('/healthz', (_, res) => {

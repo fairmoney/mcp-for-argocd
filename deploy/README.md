@@ -139,6 +139,7 @@ The browser-based SSO flow opens automatically on the first tool use, prompting 
 | `TOKEN_STORE` | No | `memory` | Token storage backend: `memory` (single-replica only) or `redis` (horizontally scalable). |
 | `REDIS_URL` | No | — | Redis connection URL (e.g., `redis://localhost:6379`). Required if `TOKEN_STORE=redis`. |
 | `TOKEN_STORE_ENCRYPTION_KEY_FILE` | No | — | Path to a file containing a 32-byte AES-256 key (as 64 hex characters or raw bytes) for encrypting tokens at rest. Optional; if omitted, tokens are stored in plaintext. |
+| `TRUST_PROXY_HOPS` | No | `1` | Number of reverse-proxy hops in front of the server (used for the HTTP transport). `1` for a single Kubernetes ingress; increase for stacked proxies (e.g. AWS ALB + nginx ingress = `2`); `0` disables proxy trust. Must be set correctly or the OAuth router's rate limiter logs `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR`. |
 
 **\* Required when `AUTH_MODE=oidc`; not used in token mode.*
 **† Provide the client secret via *exactly one* of these two; if neither is set, startup fails closed.*
