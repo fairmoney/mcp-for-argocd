@@ -134,12 +134,14 @@ The browser-based SSO flow opens automatically on the first tool use, prompting 
 | `MCP_PUBLIC_URL` | Yes* | — | The public HTTPS URL where the MCP server is accessed (e.g., `https://argocd-mcp.example.com`). Used to construct the OAuth callback URL. Must use HTTPS; trailing slashes are stripped automatically. |
 | `ARGOCD_BASE_URL` | Yes* | — | The URL of the ArgoCD server (http or https). Used for token validation and API calls. Trailing slashes are stripped automatically. |
 | `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | The OIDC client ID registered with Dex. No default (required in oidc mode); conventional/example value: `argocd-mcp`. |
-| `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE` | Yes* | — | Path to a file containing the OIDC client secret (e.g., `/secrets/oidc/clientSecret`). |
+| `ARGOCD_MCP_OIDC_CLIENT_SECRET` | Yes*† | — | The OIDC client secret provided directly as an env var (e.g., via a Kubernetes `secretKeyRef`). Trimmed on read. Takes precedence over `..._FILE` when both are set and non-blank. |
+| `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE` | Yes*† | — | Path to a file containing the OIDC client secret (e.g., `/secrets/oidc/clientSecret`). Used as the fallback when `ARGOCD_MCP_OIDC_CLIENT_SECRET` is unset or blank. |
 | `TOKEN_STORE` | No | `memory` | Token storage backend: `memory` (single-replica only) or `redis` (horizontally scalable). |
 | `REDIS_URL` | No | — | Redis connection URL (e.g., `redis://localhost:6379`). Required if `TOKEN_STORE=redis`. |
 | `TOKEN_STORE_ENCRYPTION_KEY_FILE` | No | — | Path to a file containing a 32-byte AES-256 key (as 64 hex characters or raw bytes) for encrypting tokens at rest. Optional; if omitted, tokens are stored in plaintext. |
 
 **\* Required when `AUTH_MODE=oidc`; not used in token mode.*
+**† Provide the client secret via *exactly one* of these two; if neither is set, startup fails closed.*
 
 ## Token Store Modes
 

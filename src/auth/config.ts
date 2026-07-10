@@ -40,6 +40,24 @@ const readSecretFile = (path: string | undefined, label: string): string => {
 
 const stripTrailingSlashes = (s: string): string => s.replace(/\/+$/, '');
 
+// Resolve the OIDC client secret, preferring a direct env var over a file.
+// ARGOCD_MCP_OIDC_CLIENT_SECRET wins when set (non-blank); otherwise fall back
+// to reading ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE. Both paths trim, so a stray
+// trailing newline (common with secretKeyRef injection) is harmless. Fails
+// closed if neither source yields a value.
+const resolveClientSecret = (env: NodeJS.ProcessEnv): string => {
+  const direct = (env.ARGOCD_MCP_OIDC_CLIENT_SECRET ?? '').trim();
+  if (direct) return direct;
+
+  const filePath = env.ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE;
+  if (!filePath || !filePath.trim()) {
+    throw new Error(
+      'oidc mode requires the OIDC client secret via ARGOCD_MCP_OIDC_CLIENT_SECRET or ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE'
+    );
+  }
+  return readSecretFile(filePath, 'OIDC client secret (ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE)');
+};
+
 // Build and validate the oidc-mode config. Fails closed: throws on any missing
 // or malformed input so the process crashes at startup rather than serving a
 // broken auth flow.
@@ -73,10 +91,7 @@ export const loadOidcConfig = (env: NodeJS.ProcessEnv = process.env): OidcConfig
   const clientId = (env.ARGOCD_MCP_OIDC_CLIENT_ID ?? '').trim();
   if (!clientId) throw new Error('oidc mode requires ARGOCD_MCP_OIDC_CLIENT_ID');
 
-  const clientSecret = readSecretFile(
-    env.ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE,
-    'OIDC client secret (ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE)'
-  );
+  const clientSecret = resolveClientSecret(env);
 
   const tokenStoreRaw = (env.TOKEN_STORE ?? 'memory').trim().toLowerCase();
   if (tokenStoreRaw !== 'memory' && tokenStoreRaw !== 'redis') {
