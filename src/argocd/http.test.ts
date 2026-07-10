@@ -66,3 +66,25 @@ test('a static-token 401 is not retried', async (t) => {
   assert.equal(res.status, 401);
   assert.equal(authHeaders.length, 1);
 });
+
+test("a 401 whose refresh fails surfaces ArgoCD's rejection reason", async (t) => {
+  // ArgoCD refuses the token (e.g. audience mismatch), then the refresh has no
+  // session to fall back on. The thrown error must name ArgoCD's reason, not the
+  // misleading downstream "No upstream refresh token" message.
+  const { authHeaders } = installFetch([
+    { status: 401, body: { error: 'invalid session: failed to verify the token' } }
+  ]);
+  t.after(() => mock.restoreAll());
+  const provider: BearerTokenProvider = {
+    current: async () => 'tok',
+    refresh: async () => {
+      throw new Error('No upstream refresh token available for this session');
+    }
+  };
+  const client = new HttpClient('https://argo.example.com', provider);
+  await assert.rejects(
+    () => client.get('/api/v1/applications'),
+    /ArgoCD rejected the bearer token \(401: invalid session: failed to verify the token\); token refresh failed: No upstream refresh token/
+  );
+  assert.equal(authHeaders.length, 1); // no retry attempted after a failed refresh
+});

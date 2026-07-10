@@ -50,19 +50,60 @@ kubectl patch configmap argocd-cm -n argocd -p '{
 
 Once the ConfigMap is updated, Dex will automatically reload and register the new static client.
 
-### Step 3: Configure Token Audience (if needed)
+### Step 3: Configure Token Audience (REQUIRED if the token's `aud` is `argocd-mcp`)
 
-**Common case (opaque indirection):** If your Dex instance is configured with the default opaque indirection strategy (the issued token's `aud` claim does not explicitly contain `argocd-mcp`), no additional configuration is needed. The MCP server will verify tokens against ArgoCD and accept them regardless of the audience claim.
+The MCP server forwards the user's OIDC token to the ArgoCD API. ArgoCD **enforces**
+the token's `aud` (audience) claim: it only accepts tokens minted for its own
+clients (typically `argo-cd` and `argo-cd-cli`; the exact IDs come from your
+ArgoCD/Dex config). It does **not** accept a token regardless of audience.
 
-**Custom audience case:** If you have configured Dex or your OIDC provider to explicitly set the token's `aud` claim to `argocd-mcp`, you may want to restrict ArgoCD's token acceptance. Edit the `argocd-cm` ConfigMap and add `argocd-mcp` to the `oidc.config.allowedAudiences` list:
+**Case A — token audience is NOT `argocd-mcp`:** If your Dex instance issues the
+MCP's token without `argocd-mcp` in the `aud` claim (e.g. via cross-client
+"trusted peers" so the audience remains one ArgoCD already trusts), ArgoCD accepts
+it and no extra configuration is needed.
 
-```yaml
-data:
-  oidc.config: |
-    allowedAudiences:
-      - argocd
-      - argocd-mcp
-```
+**Case B — token audience IS `argocd-mcp`:** Because the MCP uses its own Dex
+static client (`id: argocd-mcp`), Dex stamps `aud: ["argocd-mcp"]` on the issued
+token. ArgoCD then rejects **every** MCP request with `401`
+`invalid session: failed to verify the token`. Making ArgoCD accept it depends on
+how ArgoCD consumes its OIDC provider:
+
+- **External OIDC mode** (`argocd-cm` has a full `oidc.config` with `issuer` +
+  `clientID`): add `argocd-mcp` to `oidc.config.allowedAudiences`, alongside your
+  existing ArgoCD client ID (do not drop it):
+
+  ```yaml
+  data:
+    oidc.config: |
+      name: <your provider>
+      issuer: <your issuer>
+      clientID: <your ArgoCD client ID>
+      clientSecret: <...>
+      allowedAudiences:
+        - <your ArgoCD client ID>
+        - argocd-mcp
+  ```
+
+- **Bundled Dex mode** (`argocd-cm` has `dex.config`, no `oidc.config`): the
+  allowed audiences are **hardcoded** to `argo-cd` and `argo-cd-cli`
+  (`util/settings/settings.go` `OAuth2AllowedAudiences`), and ArgoCD does **not**
+  expose `trustedPeers` on its generated `argo-cd` Dex client
+  (`util/dex/config.go`), so **neither `allowedAudiences` nor Dex cross-client
+  audience is available**. Do **not** add a bare `oidc.config: { allowedAudiences }`
+  — a partial `oidc.config` (no `issuer`/`clientID`) switches ArgoCD into external
+  mode and **breaks Dex/SAML login entirely**. To use this MCP with bundled Dex you
+  must convert ArgoCD to consume Dex as external OIDC: register a static client for
+  ArgoCD's own login (e.g. `id: argo-cd-oidc` with ArgoCD's `/auth/callback`
+  redirect URI and a known secret), point `oidc.config` at
+  `https://<argocd>/api/dex` with that client, and list both it and `argocd-mcp` in
+  `allowedAudiences`. Your SAML connector keeps working underneath. **Test on a
+  non-prod ArgoCD first — this changes the login flow.**
+
+> **Diagnosing this:** if MCP tool calls fail, check the **argocd-server** logs.
+> A line like `token verification failed for all audiences: ... expected audience
+> "argo-cd" got ["argocd-mcp"]` confirms the audience mismatch. (The MCP surfaces
+> it as `ArgoCD rejected the bearer token (401: invalid session: failed to verify
+> the token)`.)
 
 ### Step 4: Deploy the MCP Server and Redis
 

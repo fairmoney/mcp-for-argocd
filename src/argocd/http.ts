@@ -47,6 +47,19 @@ export class HttpClient {
     return (this.tokenSource as BearerTokenProvider).refresh();
   }
 
+  // Best-effort extraction of ArgoCD's error text from a failed response body.
+  // ArgoCD returns `{ "error": "...", "message": "..." }`; we prefer `message`.
+  // Returns undefined for empty or non-JSON bodies so the caller can omit it.
+  private async readErrorReason(response: Response): Promise<string | undefined> {
+    try {
+      const data = (await response.clone().json()) as Record<string, unknown>;
+      const reason = data?.message ?? data?.error;
+      return typeof reason === 'string' && reason ? reason : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private headersFor(token: string, extra?: HeadersInit): Record<string, string> {
     return {
       ...(extra as Record<string, string>),
@@ -76,7 +89,20 @@ export class HttpClient {
     // A session-scoped SSO token can expire mid-session. When it does, refresh
     // once and retry a single time. Static-string tokens are never retried.
     if (response.status === 401 && this.isProvider()) {
-      token = await this.refreshToken();
+      // Capture ArgoCD's own rejection reason before we discard this response.
+      // If the refresh then fails (e.g. no session/refresh token on record), we
+      // report WHY ArgoCD refused the token — an audience mismatch or signature
+      // failure surfaces here — instead of the misleading refresh-side message.
+      const reason = await this.readErrorReason(response);
+      try {
+        token = await this.refreshToken();
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `ArgoCD rejected the bearer token (401${reason ? `: ${reason}` : ''}); ` +
+            `token refresh failed: ${detail}`
+        );
+      }
       response = await fetch(urlObject, {
         ...init,
         headers: this.headersFor(token, init?.headers)
