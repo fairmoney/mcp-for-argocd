@@ -50,9 +50,13 @@ export class HttpClient {
   // Best-effort extraction of ArgoCD's error text from a failed response body.
   // ArgoCD returns `{ "error": "...", "message": "..." }`; we prefer `message`.
   // Returns undefined for empty or non-JSON bodies so the caller can omit it.
+  //
+  // Consumes the response body directly (no clone()): this is only called on the
+  // 401 path right before the response is discarded and refetched, so cloning
+  // would just buffer the body a second time for no benefit.
   private async readErrorReason(response: Response): Promise<string | undefined> {
     try {
-      const data = (await response.clone().json()) as Record<string, unknown>;
+      const data = (await response.json()) as Record<string, unknown>;
       const reason = data?.message ?? data?.error;
       return typeof reason === 'string' && reason ? reason : undefined;
     } catch {

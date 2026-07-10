@@ -48,6 +48,30 @@ type ArgoCDArgs = {
   argocdBaseUrl?: string;
 };
 
+// Map over items with a bounded number of in-flight promises, preserving input
+// order. An unbounded Promise.all over a large resource tree buffers every
+// response body at once (a memory spike proportional to the app size and a
+// thundering herd against ArgoCD); a worker pool caps peak in-flight work.
+const MAX_RESOURCE_FETCH_CONCURRENCY = 8;
+
+const mapWithConcurrency = async <T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> => {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  };
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+};
+
 export class Server extends McpServer {
   private defaultBaseUrl: string;
   private defaultApiToken: string;
@@ -258,8 +282,8 @@ export class Server extends McpServer {
               namespace: node.namespace!
             })) || [];
         }
-        return Promise.all(
-          refs.map((ref) => client.getResource(applicationName, applicationNamespace, ref))
+        return mapWithConcurrency(refs, MAX_RESOURCE_FETCH_CONCURRENCY, (ref) =>
+          client.getResource(applicationName, applicationNamespace, ref)
         );
       }
     );

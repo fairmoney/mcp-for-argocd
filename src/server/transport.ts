@@ -15,6 +15,7 @@ import { OAuthProxyProvider } from '../auth/oauthProxyProvider.js';
 import { makeSessionTokenProvider } from '../auth/sessionTokenProvider.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
+import { HttpSessionManager } from './httpSessionManager.js';
 
 // Load the base-URL -> token registry once at startup from the JSON file at
 // ARGOCD_TOKEN_REGISTRY_PATH. Shared across all connections; read-only after
@@ -47,6 +48,9 @@ export const connectSSETransport = (port: number) => {
     transports[transport.sessionId] = transport;
     res.on('close', () => {
       delete transports[transport.sessionId];
+      // Release the per-connection McpServer too; dropping only the transport
+      // reference would leak the server (and its tools/HTTP client) per session.
+      void server.close();
     });
     await server.connect(transport);
   });
@@ -116,6 +120,30 @@ export const resolveTrustProxy = (env: NodeJS.ProcessEnv = process.env): number 
   return hops;
 };
 
+// Parse an optional positive-integer env var (fail closed on garbage), returning
+// undefined when unset so HttpSessionManager falls back to its own default.
+const resolvePositiveInt = (raw: string | undefined, name: string): number | undefined => {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return undefined;
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`Invalid ${name} "${raw}": expected a positive integer`);
+  }
+  return n;
+};
+
+// Build the session-manager knobs from the environment. MAX_SESSIONS caps how
+// many concurrent MCP sessions (each pinning an McpServer) may live at once;
+// SESSION_IDLE_TIMEOUT_SEC reaps sessions whose client vanished without a clean
+// close so their heap is reclaimed.
+export const resolveHttpSessionOptions = (env: NodeJS.ProcessEnv = process.env) => {
+  const idleSec = resolvePositiveInt(env.SESSION_IDLE_TIMEOUT_SEC, 'SESSION_IDLE_TIMEOUT_SEC');
+  return {
+    maxSessions: resolvePositiveInt(env.MAX_SESSIONS, 'MAX_SESSIONS'),
+    idleTimeoutMs: idleSec ? idleSec * 1000 : undefined
+  };
+};
+
 export const connectHttpTransport = async (port: number, stateless = false) => {
   const app = express();
   // Trust the ingress/proxy chain so forwarded client IPs are honored and the
@@ -127,7 +155,10 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
     res.status(200).json({ status: 'ok' });
   });
 
-  const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
+  // Tracks live stateful sessions, reaps idle ones, and caps concurrency so an
+  // abandoned or abusive client cannot grow the heap without bound. Unused in
+  // stateless mode (transports are per-request and closed on response end).
+  const sessions = new HttpSessionManager(resolveHttpSessionOptions());
 
   if (resolveAuthMode() === 'oidc') {
     const config = loadOidcConfig();
@@ -199,9 +230,19 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
         const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
         let transport: StreamableHTTPServerTransport;
 
-        if (!stateless && sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
-          transport = httpTransports[sessionIdFromHeader];
+        const existing =
+          !stateless && sessionIdFromHeader ? sessions.get(sessionIdFromHeader) : undefined;
+        if (existing) {
+          transport = existing as StreamableHTTPServerTransport;
         } else if (stateless || (!sessionIdFromHeader && isInitializeRequest(req.body))) {
+          if (!stateless && !sessions.hasCapacity()) {
+            res.status(503).json({
+              jsonrpc: '2.0',
+              error: { code: -32000, message: 'Server at session capacity; try again later.' },
+              id: req.body?.id ?? null
+            });
+            return;
+          }
           const opaque = req.auth!.token; // set by requireBearerAuth
           const tokenSource = makeSessionTokenProvider(store, meta, config, opaque);
 
@@ -211,13 +252,13 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
               : {
                   sessionIdGenerator: () => randomUUID(),
                   onsessioninitialized: (id) => {
-                    httpTransports[id] = transport;
+                    sessions.add(id, transport, server);
                   }
                 }
           );
           if (!stateless) {
             transport.onclose = () => {
-              if (transport.sessionId) delete httpTransports[transport.sessionId];
+              if (transport.sessionId) sessions.forget(transport.sessionId);
             };
           }
 
@@ -227,6 +268,15 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
             pinBaseUrl: true,
             tokenSource
           });
+          // Stateless: nothing tracks this transport/server, so close both when
+          // the response ends or the client disconnects — otherwise each request
+          // leaks a full McpServer until GC.
+          if (stateless) {
+            res.on('close', () => {
+              void transport.close();
+              void server.close();
+            });
+          }
           await server.connect(transport);
         } else {
           const errorMsg = sessionIdFromHeader
@@ -270,16 +320,27 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
     return;
   }
 
-  // ---- token mode (existing behavior, unchanged) ----
+  // ---- token mode (existing behavior) ----
   app.post('/mcp', async (req, res) => {
     const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
     let transport: StreamableHTTPServerTransport;
 
-    if (!stateless && sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
-      transport = httpTransports[sessionIdFromHeader];
+    const existing =
+      !stateless && sessionIdFromHeader ? sessions.get(sessionIdFromHeader) : undefined;
+    if (existing) {
+      transport = existing as StreamableHTTPServerTransport;
     } else if (stateless || (!sessionIdFromHeader && isInitializeRequest(req.body))) {
       const credentials = resolveCredentials(req, res);
       if (!credentials) return;
+
+      if (!stateless && !sessions.hasCapacity()) {
+        res.status(503).json({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'Server at session capacity; try again later.' },
+          id: req.body?.id ?? null
+        });
+        return;
+      }
 
       transport = new StreamableHTTPServerTransport(
         stateless
@@ -287,18 +348,25 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
           : {
               sessionIdGenerator: () => randomUUID(),
               onsessioninitialized: (newSessionId) => {
-                httpTransports[newSessionId] = transport;
+                sessions.add(newSessionId, transport, server);
               }
             }
       );
 
       if (!stateless) {
         transport.onclose = () => {
-          if (transport.sessionId) delete httpTransports[transport.sessionId];
+          if (transport.sessionId) sessions.forget(transport.sessionId);
         };
       }
 
       const server = createServer({ ...credentials, tokenRegistry });
+      // Stateless: close per-request transport + server when the response ends.
+      if (stateless) {
+        res.on('close', () => {
+          void transport.close();
+          void server.close();
+        });
+      }
       await server.connect(transport);
     } else {
       const errorMsg = sessionIdFromHeader
@@ -321,11 +389,12 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
       return;
     }
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
-    if (!sessionId || !httpTransports[sessionId]) {
+    const transport = sessionId ? sessions.get(sessionId) : undefined;
+    if (!transport) {
       res.status(400).send('Invalid or missing session ID');
       return;
     }
-    await httpTransports[sessionId].handleRequest(req, res);
+    await (transport as StreamableHTTPServerTransport).handleRequest(req, res);
   };
 
   app.get('/mcp', handleSessionRequest);
