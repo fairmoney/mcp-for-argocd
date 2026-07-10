@@ -8,7 +8,9 @@ import {
   V1alpha1ResourceDiff,
   V1alpha1ResourceResult,
   V1alpha1ApplicationResourceResult,
-  V1alpha1ClusterList
+  V1alpha1ClusterList,
+  ApplicationApplicationResponse,
+  ApplicationOperationTerminateResponse
 } from '../types/argocd-types.js';
 import { HttpClient, type TokenSource } from './http.js';
 
@@ -330,6 +332,72 @@ export class ArgoCDClient {
         version: resourceRef.version
       },
       action
+    );
+    return body;
+  }
+
+  public async patchResource(
+    applicationName: string,
+    applicationNamespace: string | undefined,
+    resourceRef: V1alpha1ResourceResult,
+    patch: string,
+    patchType: string
+  ) {
+    const queryParams: Record<string, string | undefined> = {
+      namespace: resourceRef.namespace,
+      resourceName: resourceRef.name,
+      group: resourceRef.group,
+      kind: resourceRef.kind,
+      version: resourceRef.version,
+      patchType
+    };
+    if (applicationNamespace) {
+      queryParams.appNamespace = applicationNamespace;
+    }
+    // The API takes the patch as a JSON-encoded string body (like the action
+    // name in runResourceAction), so the patch string is passed through as-is.
+    const { body } = await this.client.post<string, V1alpha1ApplicationResourceResult>(
+      `/api/v1/applications/${applicationName}/resource`,
+      queryParams,
+      patch
+    );
+    return body;
+  }
+
+  public async deleteResource(
+    applicationName: string,
+    applicationNamespace: string | undefined,
+    resourceRef: V1alpha1ResourceResult,
+    options?: { force?: boolean; orphan?: boolean }
+  ) {
+    const queryParams: Record<string, string | boolean | undefined> = {
+      namespace: resourceRef.namespace,
+      resourceName: resourceRef.name,
+      group: resourceRef.group,
+      kind: resourceRef.kind,
+      version: resourceRef.version
+    };
+    if (applicationNamespace) {
+      queryParams.appNamespace = applicationNamespace;
+    }
+    if (options?.force !== undefined) {
+      queryParams.force = options.force;
+    }
+    if (options?.orphan !== undefined) {
+      queryParams.orphan = options.orphan;
+    }
+    const { body } = await this.client.delete<ApplicationApplicationResponse>(
+      `/api/v1/applications/${applicationName}/resource`,
+      queryParams
+    );
+    return body;
+  }
+
+  public async terminateOperation(applicationName: string, appNamespace?: string) {
+    const queryParams = appNamespace ? { appNamespace } : undefined;
+    const { body } = await this.client.delete<ApplicationOperationTerminateResponse>(
+      `/api/v1/applications/${applicationName}/operation`,
+      queryParams
     );
     return body;
   }

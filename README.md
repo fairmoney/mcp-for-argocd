@@ -47,6 +47,7 @@ The server provides the following ArgoCD management tools:
 - `update_application`: Update an existing application
 - `delete_application`: Delete an application
 - `sync_application`: Trigger a sync operation on an application
+- `terminate_operation`: Terminate the currently running sync operation of an application (e.g. when an app is stuck on a hung operation before a cascade delete can proceed)
 
 ### Resource Management
 - `get_application_resource_tree`: Get the resource tree for a specific application
@@ -55,6 +56,8 @@ The server provides the following ArgoCD management tools:
 - `get_resource_events`: Get events for resources managed by an application
 - `get_resource_actions`: Get available actions for resources
 - `run_resource_action`: Run an action on a resource
+- `patch_resource`: Patch a live resource directly, bypassing GitOps (e.g. remove stuck finalizers) — requires `MCP_ENABLE_RESOURCE_MUTATIONS=true`
+- `delete_resource`: Delete a single live resource managed by an application — requires `MCP_ENABLE_RESOURCE_MUTATIONS=true`
 
 ## Installation
 
@@ -250,8 +253,21 @@ This will disable the following tools:
 - `delete_application`
 - `sync_application`
 - `run_resource_action`
+- `terminate_operation`
+- `patch_resource`
+- `delete_resource`
 
-By default, all the tools will be available.
+By default, all the tools will be available, except `patch_resource` and `delete_resource` which additionally require `MCP_ENABLE_RESOURCE_MUTATIONS=true` (see below).
+
+### Resource Mutations (`patch_resource` / `delete_resource`)
+
+`patch_resource` and `delete_resource` modify live cluster resources directly, bypassing GitOps: the change is not reflected in git and may be reverted (or compounded) by the next sync. They are intended as escape hatches for operational incidents — e.g. removing a stuck finalizer with a merge patch of `{"metadata":{"finalizers":null}}`, or deleting a single wedged resource. Because of this, they are disabled by default and require an explicit opt-in:
+
+```
+"MCP_ENABLE_RESOURCE_MUTATIONS": "true"
+```
+
+`MCP_READ_ONLY=true` still wins: in read-only mode these tools are never registered. ArgoCD RBAC also still applies server-side, so the API token used must be allowed to perform the underlying actions.
 
 ### Stateless Mode
 

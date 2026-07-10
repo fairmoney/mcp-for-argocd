@@ -102,6 +102,14 @@ export class Server extends McpServer {
         .trim()
         .toLowerCase() === 'true';
 
+    // patch_resource and delete_resource modify live cluster resources directly,
+    // bypassing GitOps, so they require an explicit opt-in on top of the
+    // read-only gate. ArgoCD RBAC still applies server-side.
+    const resourceMutationsEnabled =
+      String(process.env.MCP_ENABLE_RESOURCE_MUTATIONS ?? '')
+        .trim()
+        .toLowerCase() === 'true';
+
     // Always register read/query tools
     this.addJsonOutputTool(
       'list_applications',
@@ -409,6 +417,92 @@ export class Server extends McpServer {
             action
           )
       );
+      this.addJsonOutputTool(
+        'terminate_operation',
+        'terminate_operation terminates the currently running sync operation of an application. Use when an application is stuck Terminating or Running on a hung operation (e.g. "operation is terminating due to timeout") — the app controller will not process a cascade delete or a new sync until the current operation terminates.',
+        {
+          applicationName: z.string(),
+          applicationNamespace: ApplicationNamespaceSchema.optional().describe(
+            'The namespace where the application is located. Required if application is not in the default namespace.'
+          )
+        },
+        async ({ applicationName, applicationNamespace }, client) =>
+          await client.terminateOperation(applicationName, applicationNamespace)
+      );
+
+      // Resource-level escape hatches: these modify live cluster resources
+      // directly, bypassing GitOps, so they require an explicit opt-in via
+      // MCP_ENABLE_RESOURCE_MUTATIONS=true in addition to not being read-only.
+      if (resourceMutationsEnabled) {
+        this.addJsonOutputTool(
+          'patch_resource',
+          'patch_resource patches a live resource managed by an application. WARNING: this modifies live cluster resources directly, bypassing GitOps — the change is not reflected in git and may be reverted by the next sync. Typical use: removing stuck finalizers with a merge patch of {"metadata":{"finalizers":null}}.',
+          {
+            applicationName: z.string(),
+            applicationNamespace: ApplicationNamespaceSchema.optional().describe(
+              'The namespace where the application is located. Required if application is not in the default namespace.'
+            ),
+            resourceRef: ResourceRefSchema,
+            patch: z
+              .string()
+              .describe(
+                'The patch body as a JSON string, e.g. \'{"metadata":{"finalizers":null}}\''
+              ),
+            patchType: z
+              .string()
+              .default('application/merge-patch+json')
+              .describe(
+                'The patch content type: "application/merge-patch+json" (default) or "application/json-patch+json"'
+              )
+          },
+          async (
+            { applicationName, applicationNamespace, resourceRef, patch, patchType },
+            client
+          ) =>
+            await client.patchResource(
+              applicationName,
+              applicationNamespace,
+              resourceRef as V1alpha1ResourceResult,
+              patch,
+              patchType
+            )
+        );
+        this.addJsonOutputTool(
+          'delete_resource',
+          'delete_resource deletes a single live resource managed by an application. WARNING: force=true performs a foreground force delete that can orphan external/cloud resources managed by operators (e.g. Crossplane) — the operator never gets to run its cleanup. Use orphan=true to remove the resource from ArgoCD tracking without deleting it from the cluster.',
+          {
+            applicationName: z.string(),
+            applicationNamespace: ApplicationNamespaceSchema.optional().describe(
+              'The namespace where the application is located. Required if application is not in the default namespace.'
+            ),
+            resourceRef: ResourceRefSchema,
+            force: z
+              .boolean()
+              .optional()
+              .describe(
+                'Foreground force delete. Can orphan external/cloud resources managed by operators (e.g. Crossplane); use with care.'
+              ),
+            orphan: z
+              .boolean()
+              .optional()
+              .describe(
+                'Remove the resource from ArgoCD tracking without deleting it from the cluster.'
+              )
+          },
+          async ({ applicationName, applicationNamespace, resourceRef, force, orphan }, client) => {
+            const options: { force?: boolean; orphan?: boolean } = {};
+            if (force !== undefined) options.force = force;
+            if (orphan !== undefined) options.orphan = orphan;
+
+            return await client.deleteResource(
+              applicationName,
+              applicationNamespace,
+              resourceRef as V1alpha1ResourceResult,
+              Object.keys(options).length > 0 ? options : undefined
+            );
+          }
+        );
+      }
     }
   }
 

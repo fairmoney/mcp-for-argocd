@@ -160,6 +160,91 @@ test('overriding argocdBaseUrl to a different instance with no registry entry se
   assert.match(textOf(result), new RegExp(EVIL_BASE_URL));
 });
 
+// --- Tool registration gating -----------------------------------------------
+//
+// terminate_operation is an ordinary mutation tool (gated by MCP_READ_ONLY
+// only), while patch_resource / delete_resource bypass GitOps entirely and are
+// additionally gated behind MCP_ENABLE_RESOURCE_MUTATIONS.
+
+const registeredToolNames = (server: ReturnType<typeof createServer>): string[] =>
+  Object.keys(
+    (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools
+  );
+
+// Build a server with the given env vars set, restoring the previous values
+// afterwards so tests don't leak env state into each other.
+const createServerWithEnv = (env: Record<string, string | undefined>) => {
+  const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    return createServer({
+      argocdBaseUrl: DEFAULT_BASE_URL,
+      argocdApiToken: DEFAULT_TOKEN,
+      tokenRegistry: new TokenRegistry()
+    });
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+};
+
+test('terminate_operation is registered by default; resource mutations are not', () => {
+  const server = createServerWithEnv({
+    MCP_READ_ONLY: undefined,
+    MCP_ENABLE_RESOURCE_MUTATIONS: undefined
+  });
+  const tools = registeredToolNames(server);
+  assert.ok(tools.includes('terminate_operation'));
+  assert.ok(!tools.includes('patch_resource'));
+  assert.ok(!tools.includes('delete_resource'));
+});
+
+test('MCP_ENABLE_RESOURCE_MUTATIONS=true registers patch_resource and delete_resource', () => {
+  const server = createServerWithEnv({
+    MCP_READ_ONLY: undefined,
+    MCP_ENABLE_RESOURCE_MUTATIONS: 'true'
+  });
+  const tools = registeredToolNames(server);
+  assert.ok(tools.includes('patch_resource'));
+  assert.ok(tools.includes('delete_resource'));
+});
+
+test('MCP_ENABLE_RESOURCE_MUTATIONS is trimmed and case-insensitive', () => {
+  const server = createServerWithEnv({
+    MCP_READ_ONLY: undefined,
+    MCP_ENABLE_RESOURCE_MUTATIONS: '  True '
+  });
+  const tools = registeredToolNames(server);
+  assert.ok(tools.includes('patch_resource'));
+  assert.ok(tools.includes('delete_resource'));
+});
+
+test('a non-"true" MCP_ENABLE_RESOURCE_MUTATIONS does not register resource mutations', () => {
+  const server = createServerWithEnv({
+    MCP_READ_ONLY: undefined,
+    MCP_ENABLE_RESOURCE_MUTATIONS: '1'
+  });
+  const tools = registeredToolNames(server);
+  assert.ok(!tools.includes('patch_resource'));
+  assert.ok(!tools.includes('delete_resource'));
+});
+
+test('MCP_READ_ONLY=true disables all three tools even with resource mutations enabled', () => {
+  const server = createServerWithEnv({
+    MCP_READ_ONLY: 'true',
+    MCP_ENABLE_RESOURCE_MUTATIONS: 'true'
+  });
+  const tools = registeredToolNames(server);
+  assert.ok(!tools.includes('terminate_operation'));
+  assert.ok(!tools.includes('patch_resource'));
+  assert.ok(!tools.includes('delete_resource'));
+});
+
 test('with no default token, an overridden URL still resolves only from the registry', async () => {
   // Tokenless session (allowed when a registry is configured). The default token
   // is empty, so even the default URL has no token, and an unregistered override
