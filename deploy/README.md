@@ -178,7 +178,10 @@ The browser-based SSO flow opens automatically on the first tool use, prompting 
 | `ARGOCD_MCP_OIDC_CLIENT_SECRET` | Yes*† | — | The OIDC client secret provided directly as an env var (e.g., via a Kubernetes `secretKeyRef`). Trimmed on read. Takes precedence over `..._FILE` when both are set and non-blank. |
 | `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE` | Yes*† | — | Path to a file containing the OIDC client secret (e.g., `/secrets/oidc/clientSecret`). Used as the fallback when `ARGOCD_MCP_OIDC_CLIENT_SECRET` is unset or blank. |
 | `TOKEN_STORE` | No | `memory` | Token storage backend: `memory` (single-replica only) or `redis` (horizontally scalable). |
-| `REDIS_URL` | No | — | Redis connection URL (e.g., `redis://localhost:6379`). Required if `TOKEN_STORE=redis`. |
+| `REDIS_URL` | No | — | Explicit Redis connection URL (e.g., `redis://localhost:6379`, or `rediss://` for TLS). Takes precedence over the discrete `REDIS_ENDPOINT`/`REDIS_PORT` vars below. One of `REDIS_URL` or `REDIS_ENDPOINT` is required when `TOKEN_STORE=redis`. |
+| `REDIS_ENDPOINT` | No | — | Redis primary/writer host, used to build the connection URL when `REDIS_URL` is unset (e.g., an AWS ElastiCache Serverless endpoint). Only the writer endpoint is used — the token store needs read-after-write consistency, so a reader/replica endpoint must not be configured here. |
+| `REDIS_PORT` | No | `6379` | Port paired with `REDIS_ENDPOINT`. |
+| `REDIS_TLS` | No | `true` | When building from `REDIS_ENDPOINT`, use TLS (`rediss://`). Defaults to `true` (required by ElastiCache Serverless); set to `false` for a plaintext/self-hosted Redis. |
 | `TOKEN_STORE_ENCRYPTION_KEY_FILE` | No | — | Path to a file containing a 32-byte AES-256 key (as 64 hex characters or raw bytes) for encrypting tokens at rest. Optional; if omitted, tokens are stored in plaintext. |
 | `TRUST_PROXY_HOPS` | No | `1` | Number of reverse-proxy hops in front of the server (used for the HTTP transport). `1` for a single Kubernetes ingress; increase for stacked proxies (e.g. AWS ALB + nginx ingress = `2`); `0` disables proxy trust. Must be set correctly or the OAuth router's rate limiter logs `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR`. |
 

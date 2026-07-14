@@ -40,6 +40,33 @@ const readSecretFile = (path: string | undefined, label: string): string => {
 
 const stripTrailingSlashes = (s: string): string => s.replace(/\/+$/, '');
 
+// Resolve the Redis connection URL for the token store.
+//
+// Precedence: an explicit REDIS_URL wins (the caller fully controls scheme,
+// auth, and TLS). Otherwise build one from the discrete AWS-style vars:
+// REDIS_ENDPOINT (host) + REDIS_PORT (default 6379). TLS is on by default
+// (rediss://) because ElastiCache Serverless mandates it; set REDIS_TLS=false
+// for a plaintext/self-hosted Redis.
+//
+// NOTE: only the primary/writer endpoint is used. The token store relies on
+// read-after-write consistency (e.g. putAuthCode then takeAuthCode), so reads
+// must not be served from a possibly-lagging replica — REDIS_READER_ENDPOINT is
+// intentionally not consumed.
+export const buildRedisUrl = (env: NodeJS.ProcessEnv = process.env): string | undefined => {
+  const explicit = (env.REDIS_URL ?? '').trim();
+  if (explicit) return explicit;
+
+  const endpoint = (env.REDIS_ENDPOINT ?? '').trim();
+  if (!endpoint) return undefined;
+
+  const port = (env.REDIS_PORT ?? '').trim() || '6379';
+  if (!/^\d+$/.test(port)) {
+    throw new Error(`Invalid REDIS_PORT "${env.REDIS_PORT}": expected a port number`);
+  }
+  const useTls = (env.REDIS_TLS ?? 'true').trim().toLowerCase() !== 'false';
+  return `${useTls ? 'rediss' : 'redis'}://${endpoint}:${port}`;
+};
+
 // Resolve the OIDC client secret, preferring a direct env var over a file.
 // ARGOCD_MCP_OIDC_CLIENT_SECRET wins when set (non-blank); otherwise fall back
 // to reading ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE. Both paths trim, so a stray
@@ -101,8 +128,8 @@ export const loadOidcConfig = (env: NodeJS.ProcessEnv = process.env): OidcConfig
 
   let redisUrl: string | undefined;
   if (tokenStore === 'redis') {
-    redisUrl = (env.REDIS_URL ?? '').trim();
-    if (!redisUrl) throw new Error('TOKEN_STORE=redis requires REDIS_URL');
+    redisUrl = buildRedisUrl(env);
+    if (!redisUrl) throw new Error('TOKEN_STORE=redis requires REDIS_URL or REDIS_ENDPOINT');
   }
 
   let encryptionKey: Buffer | undefined;

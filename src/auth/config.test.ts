@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveAuthMode, loadOidcConfig } from './config.js';
+import { resolveAuthMode, loadOidcConfig, buildRedisUrl } from './config.js';
 
 const withSecretFile = (contents: string): { path: string; cleanup: () => void } => {
   const dir = mkdtempSync(join(tmpdir(), 'auth-config-test-'));
@@ -112,6 +112,67 @@ test('loadOidcConfig falls back to the secret file when the env var is set but e
   try {
     const cfg = loadOidcConfig({ ...validEnv(path), ARGOCD_MCP_OIDC_CLIENT_SECRET: '   ' });
     assert.equal(cfg.clientSecret, 'file-secret');
+  } finally {
+    cleanup();
+  }
+});
+
+test('buildRedisUrl returns REDIS_URL verbatim when set', () => {
+  assert.equal(buildRedisUrl({ REDIS_URL: 'redis://localhost:6379' }), 'redis://localhost:6379');
+});
+
+test('buildRedisUrl builds a TLS rediss:// url from REDIS_ENDPOINT (default port 6379)', () => {
+  assert.equal(
+    buildRedisUrl({ REDIS_ENDPOINT: 'cache.euw1.amazonaws.com' }),
+    'rediss://cache.euw1.amazonaws.com:6379'
+  );
+});
+
+test('buildRedisUrl honors REDIS_PORT', () => {
+  assert.equal(
+    buildRedisUrl({ REDIS_ENDPOINT: 'cache.euw1.amazonaws.com', REDIS_PORT: '6380' }),
+    'rediss://cache.euw1.amazonaws.com:6380'
+  );
+});
+
+test('buildRedisUrl prefers REDIS_URL over REDIS_ENDPOINT', () => {
+  assert.equal(
+    buildRedisUrl({
+      REDIS_URL: 'redis://explicit:6379',
+      REDIS_ENDPOINT: 'cache.euw1.amazonaws.com'
+    }),
+    'redis://explicit:6379'
+  );
+});
+
+test('buildRedisUrl allows disabling TLS with REDIS_TLS=false', () => {
+  assert.equal(
+    buildRedisUrl({ REDIS_ENDPOINT: 'localhost', REDIS_TLS: 'false' }),
+    'redis://localhost:6379'
+  );
+});
+
+test('buildRedisUrl returns undefined when neither REDIS_URL nor REDIS_ENDPOINT is set', () => {
+  assert.equal(buildRedisUrl({}), undefined);
+});
+
+test('buildRedisUrl fails closed on a non-numeric REDIS_PORT', () => {
+  assert.throws(
+    () => buildRedisUrl({ REDIS_ENDPOINT: 'cache.euw1.amazonaws.com', REDIS_PORT: 'abc' }),
+    /REDIS_PORT/
+  );
+});
+
+test('loadOidcConfig builds redisUrl from REDIS_ENDPOINT when TOKEN_STORE=redis', () => {
+  const { path, cleanup } = withSecretFile('s');
+  try {
+    const cfg = loadOidcConfig({
+      ...validEnv(path),
+      TOKEN_STORE: 'redis',
+      REDIS_ENDPOINT: 'cache.euw1.amazonaws.com',
+      REDIS_PORT: '6379'
+    });
+    assert.equal(cfg.redisUrl, 'rediss://cache.euw1.amazonaws.com:6379');
   } finally {
     cleanup();
   }

@@ -29,7 +29,7 @@ export const createTokenStore = (
   env: NodeJS.ProcessEnv = process.env
 ): TokenStore => {
   if (config.tokenStore === 'redis') {
-    if (!config.redisUrl) throw new Error('TOKEN_STORE=redis requires REDIS_URL');
+    if (!config.redisUrl) throw new Error('TOKEN_STORE=redis requires REDIS_URL or REDIS_ENDPOINT');
     logger.info('Using Redis token store');
     const codec = config.encryptionKey ? aesGcmCodec(config.encryptionKey) : plainCodec;
     return new RedisTokenStore(new Redis(config.redisUrl), codec);
