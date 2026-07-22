@@ -114,6 +114,22 @@ const resolveClientSecret = (env: NodeJS.ProcessEnv): string => {
   return readSecretFile(filePath, 'OIDC client secret (ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE)');
 };
 
+// Resolve ArgoCD's server.secretkey for derived client mode, preferring a
+// direct env var over a file — same precedence and trimming as
+// resolveClientSecret. Fails closed if neither source yields a value.
+const resolveServerSecretKey = (env: NodeJS.ProcessEnv): string => {
+  const direct = (env.ARGOCD_SERVER_SECRETKEY ?? '').trim();
+  if (direct) return direct;
+
+  const filePath = env.ARGOCD_SERVER_SECRETKEY_FILE;
+  if (!filePath || !filePath.trim()) {
+    throw new Error(
+      'ARGOCD_MCP_OIDC_CLIENT_MODE=derived requires the ArgoCD server secret key via ARGOCD_SERVER_SECRETKEY or ARGOCD_SERVER_SECRETKEY_FILE'
+    );
+  }
+  return readSecretFile(filePath, 'ArgoCD server secret key (ARGOCD_SERVER_SECRETKEY_FILE)');
+};
+
 // Build and validate the oidc-mode config. Fails closed: throws on any missing
 // or malformed input so the process crashes at startup rather than serving a
 // broken auth flow.
@@ -160,16 +176,10 @@ export const loadOidcConfig = (env: NodeJS.ProcessEnv = process.env): OidcConfig
     ).filter((name) => (env[name] ?? '').trim() !== '');
     if (conflicting.length > 0) {
       throw new Error(
-        `ARGOCD_MCP_OIDC_CLIENT_MODE=derived derives the client from ARGOCD_SERVER_SECRETKEY_FILE; unset ${conflicting.join(', ')}`
+        `ARGOCD_MCP_OIDC_CLIENT_MODE=derived derives the client from ARGOCD_SERVER_SECRETKEY(_FILE); unset ${conflicting.join(', ')}`
       );
     }
-    if (!env.ARGOCD_SERVER_SECRETKEY_FILE || !env.ARGOCD_SERVER_SECRETKEY_FILE.trim()) {
-      throw new Error('ARGOCD_MCP_OIDC_CLIENT_MODE=derived requires ARGOCD_SERVER_SECRETKEY_FILE');
-    }
-    const serverSecretKey = readSecretFile(
-      env.ARGOCD_SERVER_SECRETKEY_FILE,
-      'ArgoCD server secret key (ARGOCD_SERVER_SECRETKEY_FILE)'
-    );
+    const serverSecretKey = resolveServerSecretKey(env);
     clientId = ARGOCD_DEX_CLIENT_ID;
     clientSecret = deriveDexClientSecret(serverSecretKey);
     callbackPath = DERIVED_CALLBACK_PATH;

@@ -308,7 +308,8 @@ When a client initiates a session, the server redirects to Dex for user authenti
 |---|---|---|---|
 | `AUTH_MODE` | No | `token` | Set to `oidc` to enable SSO mode. |
 | `ARGOCD_MCP_OIDC_CLIENT_MODE` | No | `explicit` | `explicit` (dedicated `argocd-mcp` client) or `derived` (reuse ArgoCD's `argo-cd` client; secret derived from `server.secretkey`; callback `/auth/callback`; bundled Dex only). |
-| `ARGOCD_SERVER_SECRETKEY_FILE` | Yes*§ | — | Derived mode only: path to a mounted copy of `argocd-secret`'s `server.secretkey`. |
+| `ARGOCD_SERVER_SECRETKEY` | Yes*§ | — | Derived mode only: `argocd-secret`'s `server.secretkey` provided directly (e.g., via `secretKeyRef`). Takes precedence over `..._FILE`. |
+| `ARGOCD_SERVER_SECRETKEY_FILE` | Yes*§ | — | Derived mode only: path to a mounted copy of `argocd-secret`'s `server.secretkey`. Fallback when `ARGOCD_SERVER_SECRETKEY` is unset or blank. |
 | `MCP_PUBLIC_URL` | Yes* | — | Public HTTPS URL of the MCP server (e.g., `https://argocd-mcp.example.com`). Must be HTTPS; used to construct the OAuth callback URL. |
 | `ARGOCD_BASE_URL` | Yes* | — | ArgoCD server URL (http or https); used for token validation. |
 | `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | OIDC client ID registered with Dex. No default (required in oidc mode); conventional/example value: `argocd-mcp`. |
@@ -318,7 +319,7 @@ When a client initiates a session, the server redirects to Dex for user authenti
 | `TOKEN_STORE_ENCRYPTION_KEY_FILE` | No | — | Path to a 32-byte AES-256 key file for at-rest token encryption (optional). |
 
 **\* Required when `AUTH_MODE=oidc`; not used in token mode.*
-**§ Required when `ARGOCD_MCP_OIDC_CLIENT_MODE=derived`; forbidden otherwise. `server.secretkey` also signs ArgoCD session JWTs — see `deploy/derived-mode.yaml`.*
+**§ Derived mode only (forbidden otherwise); provide the key via *exactly one* of these two (the direct env var wins when both are set). `server.secretkey` also signs ArgoCD session JWTs — see `deploy/derived-mode.yaml`.*
 
 **Single-replica in-memory store:** If using `TOKEN_STORE=memory` (the default), set `replicas: 1` in the Deployment spec — multiple replicas without sticky sessions will cause inconsistent state and 400 errors.
 

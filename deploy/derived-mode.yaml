@@ -21,7 +21,18 @@ data:
     - https://argocd-mcp.example.com
 ---
 # 2) Patch for the MCP Deployment (replaces the explicit-client env and the
-#    oidc-secret volume in mcp-deployment.yaml):
+#    oidc-secret volume in mcp-deployment.yaml). Simplest form — inject the key
+#    directly with a secretKeyRef (no volume needed):
+#
+#    env:
+#      - { name: AUTH_MODE, value: oidc }
+#      - { name: ARGOCD_MCP_OIDC_CLIENT_MODE, value: derived }
+#      - name: ARGOCD_SERVER_SECRETKEY
+#        valueFrom:
+#          secretKeyRef: { name: argocd-secret, key: server.secretkey }
+#
+#    Alternatively, mount the key as a file (keeps the value off the pod-spec
+#    env surface) and point ARGOCD_SERVER_SECRETKEY_FILE at it:
 #
 #    env:
 #      - { name: AUTH_MODE, value: oidc }

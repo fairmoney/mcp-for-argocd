@@ -207,10 +207,43 @@ test('loadOidcConfig in derived mode uses the argo-cd client and /auth/callback'
   }
 });
 
-test('loadOidcConfig in derived mode requires ARGOCD_SERVER_SECRETKEY_FILE', () => {
+test('loadOidcConfig in derived mode requires the secretkey via env var or file', () => {
   const env = derivedEnv('');
   delete env.ARGOCD_SERVER_SECRETKEY_FILE;
-  assert.throws(() => loadOidcConfig(env), /ARGOCD_SERVER_SECRETKEY_FILE/);
+  assert.throws(
+    () => loadOidcConfig(env),
+    /ARGOCD_SERVER_SECRETKEY or ARGOCD_SERVER_SECRETKEY_FILE/
+  );
+});
+
+test('loadOidcConfig in derived mode reads the secretkey from ARGOCD_SERVER_SECRETKEY when set', () => {
+  const env = derivedEnv('');
+  delete env.ARGOCD_SERVER_SECRETKEY_FILE;
+  const cfg = loadOidcConfig({ ...env, ARGOCD_SERVER_SECRETKEY: '  test-server-signature-key\n' });
+  assert.equal(cfg.clientSecret, 'cbeOgaLo8YsJi74TXZRRLozNtAZyTrTdNTrYedoF'); // trimmed
+});
+
+test('loadOidcConfig in derived mode prefers ARGOCD_SERVER_SECRETKEY over the file when both are set', () => {
+  const { path, cleanup } = withSecretFile('file-key');
+  try {
+    const cfg = loadOidcConfig({
+      ...derivedEnv(path),
+      ARGOCD_SERVER_SECRETKEY: 'test-server-signature-key'
+    });
+    assert.equal(cfg.clientSecret, 'cbeOgaLo8YsJi74TXZRRLozNtAZyTrTdNTrYedoF');
+  } finally {
+    cleanup();
+  }
+});
+
+test('loadOidcConfig in derived mode falls back to the file when ARGOCD_SERVER_SECRETKEY is blank', () => {
+  const { path, cleanup } = withSecretFile('test-server-signature-key');
+  try {
+    const cfg = loadOidcConfig({ ...derivedEnv(path), ARGOCD_SERVER_SECRETKEY: '   ' });
+    assert.equal(cfg.clientSecret, 'cbeOgaLo8YsJi74TXZRRLozNtAZyTrTdNTrYedoF');
+  } finally {
+    cleanup();
+  }
 });
 
 test('loadOidcConfig in derived mode rejects conflicting explicit-client vars', () => {
