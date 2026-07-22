@@ -4,18 +4,25 @@ import { createHash } from 'node:crypto';
 export type AuthMode = 'token' | 'oidc';
 
 export interface OidcConfig {
+  mode: OidcClientMode;
   publicUrl: string; // https, no trailing slash
   argocdBaseUrl: string;
   clientId: string;
   clientSecret: string;
-  callbackPath: string; // '/oauth/callback'
+  callbackPath: string; // '/oauth/callback' (explicit) | '/auth/callback' (derived)
   callbackUrl: string; // publicUrl + callbackPath
   tokenStore: 'memory' | 'redis';
   redisUrl?: string;
   encryptionKey?: Buffer;
 }
 
-const CALLBACK_PATH = '/oauth/callback';
+const EXPLICIT_CALLBACK_PATH = '/oauth/callback';
+// Derived mode reuses ArgoCD's own "argo-cd" Dex static client, whose extra
+// redirect URIs are always <additionalUrls[i]>/auth/callback (argo-cd
+// util/dex/config.go GenerateDexConfigYAML) — so our callback must live there.
+const DERIVED_CALLBACK_PATH = '/auth/callback';
+// ArgoCD's own Dex static client id (common.ArgoCDClientAppID upstream).
+const ARGOCD_DEX_CLIENT_ID = 'argo-cd';
 
 // Read AUTH_MODE; default to today's token-based behavior. Reject typos loudly
 // so a misspelled mode never silently falls back to the wrong behavior.
@@ -137,10 +144,41 @@ export const loadOidcConfig = (env: NodeJS.ProcessEnv = process.env): OidcConfig
   }
   const argocdBaseUrl = stripTrailingSlashes(argocdBaseUrlRaw);
 
-  const clientId = (env.ARGOCD_MCP_OIDC_CLIENT_ID ?? '').trim();
-  if (!clientId) throw new Error('oidc mode requires ARGOCD_MCP_OIDC_CLIENT_ID');
-
-  const clientSecret = resolveClientSecret(env);
+  const mode = resolveOidcClientMode(env);
+  let clientId: string;
+  let clientSecret: string;
+  let callbackPath: string;
+  if (mode === 'derived') {
+    // Fail closed on ambiguity: the explicit-client vars must not be set when
+    // the client is derived from ArgoCD's server.secretkey.
+    const conflicting = (
+      [
+        'ARGOCD_MCP_OIDC_CLIENT_ID',
+        'ARGOCD_MCP_OIDC_CLIENT_SECRET',
+        'ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE'
+      ] as const
+    ).filter((name) => (env[name] ?? '').trim() !== '');
+    if (conflicting.length > 0) {
+      throw new Error(
+        `ARGOCD_MCP_OIDC_CLIENT_MODE=derived derives the client from ARGOCD_SERVER_SECRETKEY_FILE; unset ${conflicting.join(', ')}`
+      );
+    }
+    if (!env.ARGOCD_SERVER_SECRETKEY_FILE || !env.ARGOCD_SERVER_SECRETKEY_FILE.trim()) {
+      throw new Error('ARGOCD_MCP_OIDC_CLIENT_MODE=derived requires ARGOCD_SERVER_SECRETKEY_FILE');
+    }
+    const serverSecretKey = readSecretFile(
+      env.ARGOCD_SERVER_SECRETKEY_FILE,
+      'ArgoCD server secret key (ARGOCD_SERVER_SECRETKEY_FILE)'
+    );
+    clientId = ARGOCD_DEX_CLIENT_ID;
+    clientSecret = deriveDexClientSecret(serverSecretKey);
+    callbackPath = DERIVED_CALLBACK_PATH;
+  } else {
+    clientId = (env.ARGOCD_MCP_OIDC_CLIENT_ID ?? '').trim();
+    if (!clientId) throw new Error('oidc mode requires ARGOCD_MCP_OIDC_CLIENT_ID');
+    clientSecret = resolveClientSecret(env);
+    callbackPath = EXPLICIT_CALLBACK_PATH;
+  }
 
   const tokenStoreRaw = (env.TOKEN_STORE ?? 'memory').trim().toLowerCase();
   if (tokenStoreRaw !== 'memory' && tokenStoreRaw !== 'redis') {
@@ -171,12 +209,13 @@ export const loadOidcConfig = (env: NodeJS.ProcessEnv = process.env): OidcConfig
 
   const normalizedPublic = stripTrailingSlashes(publicUrl.toString());
   return {
+    mode,
     publicUrl: normalizedPublic,
     argocdBaseUrl,
     clientId,
     clientSecret,
-    callbackPath: CALLBACK_PATH,
-    callbackUrl: `${normalizedPublic}${CALLBACK_PATH}`,
+    callbackPath,
+    callbackUrl: `${normalizedPublic}${callbackPath}`,
     tokenStore,
     redisUrl,
     encryptionKey

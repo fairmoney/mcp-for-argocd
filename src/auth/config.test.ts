@@ -184,6 +184,65 @@ test('loadOidcConfig builds redisUrl from REDIS_ENDPOINT when TOKEN_STORE=redis'
   }
 });
 
+// A minimal valid derived-mode env, parameterized by the secretkey file path.
+const derivedEnv = (secretKeyPath: string): NodeJS.ProcessEnv => ({
+  AUTH_MODE: 'oidc',
+  ARGOCD_MCP_OIDC_CLIENT_MODE: 'derived',
+  MCP_PUBLIC_URL: 'https://argocd-mcp.example.com/',
+  ARGOCD_BASE_URL: 'https://argocd.example.com',
+  ARGOCD_SERVER_SECRETKEY_FILE: secretKeyPath
+});
+
+test('loadOidcConfig in derived mode uses the argo-cd client and /auth/callback', () => {
+  const { path, cleanup } = withSecretFile('test-server-signature-key\n');
+  try {
+    const cfg = loadOidcConfig(derivedEnv(path));
+    assert.equal(cfg.mode, 'derived');
+    assert.equal(cfg.clientId, 'argo-cd');
+    assert.equal(cfg.clientSecret, 'cbeOgaLo8YsJi74TXZRRLozNtAZyTrTdNTrYedoF'); // trimmed file
+    assert.equal(cfg.callbackPath, '/auth/callback');
+    assert.equal(cfg.callbackUrl, 'https://argocd-mcp.example.com/auth/callback');
+  } finally {
+    cleanup();
+  }
+});
+
+test('loadOidcConfig in derived mode requires ARGOCD_SERVER_SECRETKEY_FILE', () => {
+  const env = derivedEnv('');
+  delete env.ARGOCD_SERVER_SECRETKEY_FILE;
+  assert.throws(() => loadOidcConfig(env), /ARGOCD_SERVER_SECRETKEY_FILE/);
+});
+
+test('loadOidcConfig in derived mode rejects conflicting explicit-client vars', () => {
+  const { path, cleanup } = withSecretFile('k');
+  try {
+    for (const conflict of [
+      { ARGOCD_MCP_OIDC_CLIENT_ID: 'argocd-mcp' },
+      { ARGOCD_MCP_OIDC_CLIENT_SECRET: 's' },
+      { ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE: path }
+    ]) {
+      assert.throws(
+        () => loadOidcConfig({ ...derivedEnv(path), ...conflict }),
+        new RegExp(Object.keys(conflict)[0])
+      );
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('loadOidcConfig defaults to explicit mode and keeps todays behavior', () => {
+  const { path, cleanup } = withSecretFile('s3cret');
+  try {
+    const cfg = loadOidcConfig(validEnv(path));
+    assert.equal(cfg.mode, 'explicit');
+    assert.equal(cfg.clientId, 'argocd-mcp');
+    assert.equal(cfg.callbackPath, '/oauth/callback');
+  } finally {
+    cleanup();
+  }
+});
+
 // --- OIDC client mode + derived secret ---
 
 test('resolveOidcClientMode defaults to explicit when unset or blank', () => {

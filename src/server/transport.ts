@@ -162,6 +162,10 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
 
   if (resolveAuthMode() === 'oidc') {
     const config = loadOidcConfig();
+    logger.info(
+      { clientMode: config.mode, clientId: config.clientId },
+      'OIDC client mode resolved'
+    );
     const store = createTokenStore(config);
 
     // Resolve OIDC discovery ONCE at startup and fail closed. Starting the
