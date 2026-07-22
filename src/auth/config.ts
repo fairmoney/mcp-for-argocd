@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 export type AuthMode = 'token' | 'oidc';
 
@@ -24,6 +25,27 @@ export const resolveAuthMode = (env: NodeJS.ProcessEnv = process.env): AuthMode 
   if (raw === 'oidc') return 'oidc';
   throw new Error(`Invalid AUTH_MODE "${env.AUTH_MODE}": expected "token" or "oidc"`);
 };
+
+export type OidcClientMode = 'explicit' | 'derived';
+
+// Read ARGOCD_MCP_OIDC_CLIENT_MODE; default to the pre-existing explicit
+// client behavior. Reject typos loudly (same convention as resolveAuthMode).
+export const resolveOidcClientMode = (env: NodeJS.ProcessEnv = process.env): OidcClientMode => {
+  const raw = (env.ARGOCD_MCP_OIDC_CLIENT_MODE ?? '').trim().toLowerCase();
+  if (raw === '' || raw === 'explicit') return 'explicit';
+  if (raw === 'derived') return 'derived';
+  throw new Error(
+    `Invalid ARGOCD_MCP_OIDC_CLIENT_MODE "${env.ARGOCD_MCP_OIDC_CLIENT_MODE}": expected "explicit" or "derived"`
+  );
+};
+
+// Port of ArgoCD's DexOAuth2ClientSecret() (util/settings/settings.go): the
+// bundled Dex "argo-cd" static client secret is not stored anywhere — every
+// party derives base64url(sha256(server.secretkey)) truncated to 40 chars.
+// Go uses padded base64.URLEncoding while Node's base64url is unpadded, but
+// sha256 output encodes to 44 chars, so the first 40 are identical.
+export const deriveDexClientSecret = (serverSecretKey: string): string =>
+  createHash('sha256').update(serverSecretKey).digest('base64url').slice(0, 40);
 
 const readSecretFile = (path: string | undefined, label: string): string => {
   if (!path || !path.trim()) {

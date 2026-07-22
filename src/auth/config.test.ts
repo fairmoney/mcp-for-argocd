@@ -3,7 +3,13 @@ import { test } from 'node:test';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveAuthMode, loadOidcConfig, buildRedisUrl } from './config.js';
+import {
+  resolveAuthMode,
+  resolveOidcClientMode,
+  deriveDexClientSecret,
+  loadOidcConfig,
+  buildRedisUrl
+} from './config.js';
 
 const withSecretFile = (contents: string): { path: string; cleanup: () => void } => {
   const dir = mkdtempSync(join(tmpdir(), 'auth-config-test-'));
@@ -176,6 +182,38 @@ test('loadOidcConfig builds redisUrl from REDIS_ENDPOINT when TOKEN_STORE=redis'
   } finally {
     cleanup();
   }
+});
+
+// --- OIDC client mode + derived secret ---
+
+test('resolveOidcClientMode defaults to explicit when unset or blank', () => {
+  assert.equal(resolveOidcClientMode({}), 'explicit');
+  assert.equal(resolveOidcClientMode({ ARGOCD_MCP_OIDC_CLIENT_MODE: '  ' }), 'explicit');
+});
+
+test('resolveOidcClientMode reads explicit and derived (case-insensitive)', () => {
+  assert.equal(resolveOidcClientMode({ ARGOCD_MCP_OIDC_CLIENT_MODE: 'explicit' }), 'explicit');
+  assert.equal(resolveOidcClientMode({ ARGOCD_MCP_OIDC_CLIENT_MODE: 'Derived' }), 'derived');
+});
+
+test('resolveOidcClientMode rejects unknown modes loudly', () => {
+  assert.throws(
+    () => resolveOidcClientMode({ ARGOCD_MCP_OIDC_CLIENT_MODE: 'auto' }),
+    /ARGOCD_MCP_OIDC_CLIENT_MODE/
+  );
+});
+
+test('deriveDexClientSecret matches ArgoCD DexOAuth2ClientSecret (Go parity vector)', () => {
+  // Vector triple-checked against Go base64.URLEncoding, Node base64url, Python.
+  assert.equal(
+    deriveDexClientSecret('test-server-signature-key'),
+    'cbeOgaLo8YsJi74TXZRRLozNtAZyTrTdNTrYedoF'
+  );
+});
+
+test('deriveDexClientSecret always yields 40 chars', () => {
+  assert.equal(deriveDexClientSecret('').length, 40);
+  assert.equal(deriveDexClientSecret('x'.repeat(1000)).length, 40);
 });
 
 test('loadOidcConfig errors when neither the client secret env var nor file is set', () => {
