@@ -5,6 +5,10 @@
 # The client secret must also be present in the argocd-secret Secret under the
 # key referenced by $oidc.argocd-mcp.clientSecret, and mounted into the MCP
 # server (see mcp-deployment.yaml) at ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE.
+#
+# NOTE: this file is only needed in explicit client mode
+# (ARGOCD_MCP_OIDC_CLIENT_MODE unset or "explicit"). Derived mode needs no
+# dex.config changes — see deploy/derived-mode.yaml.
 apiVersion: v1
 kind: ConfigMap
 metadata:

@@ -300,11 +300,15 @@ ArgoCD MCP supports federated authentication via ArgoCD's Dex OIDC provider. In 
 **Browser OAuth flow:**
 When a client initiates a session, the server redirects to Dex for user authentication. Dex authenticates the user against your upstream identity provider (LDAP, GitHub, SAML, etc.) and returns an authorization code to the MCP server's callback endpoint (`https://<mcp-ingress>/oauth/callback`). The server exchanges this code for an access token at Dex's token endpoint using a pre-registered confidential client. The token is stored (in memory or Redis) and refreshed on-demand, ensuring seamless authentication without exposing Dex credentials to the user.
 
+**Client modes:** By default the server uses a dedicated confidential Dex client (`argocd-mcp`, explicit mode) — note that with ArgoCD's *bundled* Dex, the API server only accepts token audiences `argo-cd`/`argo-cd-cli`, so explicit mode requires an external `oidc.config` with `allowedAudiences`. Alternatively, set `ARGOCD_MCP_OIDC_CLIENT_MODE=derived` to reuse ArgoCD's own `argo-cd` client: the client secret is derived from `argocd-secret`'s `server.secretkey` exactly as ArgoCD derives it, the callback moves to `/auth/callback`, and the MCP public URL must be listed in `argocd-cm`'s `additionalUrls`. Tokens then carry `aud: argo-cd` and are accepted natively. See `deploy/derived-mode.yaml` for the trust-tier caveat.
+
 **Environment variables:**
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
 | `AUTH_MODE` | No | `token` | Set to `oidc` to enable SSO mode. |
+| `ARGOCD_MCP_OIDC_CLIENT_MODE` | No | `explicit` | `explicit` (dedicated `argocd-mcp` client) or `derived` (reuse ArgoCD's `argo-cd` client; secret derived from `server.secretkey`; callback `/auth/callback`; bundled Dex only). |
+| `ARGOCD_SERVER_SECRETKEY_FILE` | Yes*§ | — | Derived mode only: path to a mounted copy of `argocd-secret`'s `server.secretkey`. |
 | `MCP_PUBLIC_URL` | Yes* | — | Public HTTPS URL of the MCP server (e.g., `https://argocd-mcp.example.com`). Must be HTTPS; used to construct the OAuth callback URL. |
 | `ARGOCD_BASE_URL` | Yes* | — | ArgoCD server URL (http or https); used for token validation. |
 | `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | OIDC client ID registered with Dex. No default (required in oidc mode); conventional/example value: `argocd-mcp`. |
@@ -314,6 +318,7 @@ When a client initiates a session, the server redirects to Dex for user authenti
 | `TOKEN_STORE_ENCRYPTION_KEY_FILE` | No | — | Path to a 32-byte AES-256 key file for at-rest token encryption (optional). |
 
 **\* Required when `AUTH_MODE=oidc`; not used in token mode.*
+**§ Required when `ARGOCD_MCP_OIDC_CLIENT_MODE=derived`; forbidden otherwise. `server.secretkey` also signs ArgoCD session JWTs — see `deploy/derived-mode.yaml`.*
 
 **Single-replica in-memory store:** If using `TOKEN_STORE=memory` (the default), set `replicas: 1` in the Deployment spec — multiple replicas without sticky sessions will cause inconsistent state and 400 errors.
 

@@ -172,11 +172,13 @@ The browser-based SSO flow opens automatically on the first tool use, prompting 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `AUTH_MODE` | No | `token` | Set to `oidc` to enable SSO mode. |
+| `ARGOCD_MCP_OIDC_CLIENT_MODE` | No | `explicit` | OIDC client mode. `explicit` uses a dedicated `argocd-mcp` Dex static client. `derived` reuses ArgoCD's own `argo-cd` client: the secret is derived from `argocd-secret`'s `server.secretkey` and the callback moves to `/auth/callback`. Requires ArgoCD's bundled Dex. |
+| `ARGOCD_SERVER_SECRETKEY_FILE` | Yes*§ | — | Path to a mounted copy of `argocd-secret`'s `server.secretkey` (mount only that key via `items:`). Required (and only allowed) when `ARGOCD_MCP_OIDC_CLIENT_MODE=derived`. |
 | `MCP_PUBLIC_URL` | Yes* | — | The public HTTPS URL where the MCP server is accessed (e.g., `https://argocd-mcp.example.com`). Used to construct the OAuth callback URL. Must use HTTPS; trailing slashes are stripped automatically. |
 | `ARGOCD_BASE_URL` | Yes* | — | The URL of the ArgoCD server (http or https). Used for token validation and API calls. Trailing slashes are stripped automatically. |
-| `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | The OIDC client ID registered with Dex. No default (required in oidc mode); conventional/example value: `argocd-mcp`. |
-| `ARGOCD_MCP_OIDC_CLIENT_SECRET` | Yes*† | — | The OIDC client secret provided directly as an env var (e.g., via a Kubernetes `secretKeyRef`). Trimmed on read. Takes precedence over `..._FILE` when both are set and non-blank. |
-| `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE` | Yes*† | — | Path to a file containing the OIDC client secret (e.g., `/secrets/oidc/clientSecret`). Used as the fallback when `ARGOCD_MCP_OIDC_CLIENT_SECRET` is unset or blank. |
+| `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes*‡ | — | The OIDC client ID registered with Dex. No default (required in oidc mode); conventional/example value: `argocd-mcp`. |
+| `ARGOCD_MCP_OIDC_CLIENT_SECRET` | Yes*†‡ | — | The OIDC client secret provided directly as an env var (e.g., via a Kubernetes `secretKeyRef`). Trimmed on read. Takes precedence over `..._FILE` when both are set and non-blank. |
+| `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE` | Yes*†‡ | — | Path to a file containing the OIDC client secret (e.g., `/secrets/oidc/clientSecret`). Used as the fallback when `ARGOCD_MCP_OIDC_CLIENT_SECRET` is unset or blank. |
 | `TOKEN_STORE` | No | `memory` | Token storage backend: `memory` (single-replica only) or `redis` (horizontally scalable). |
 | `REDIS_URL` | No | — | Explicit Redis connection URL (e.g., `redis://localhost:6379`, or `rediss://` for TLS). Takes precedence over the discrete `REDIS_ENDPOINT`/`REDIS_PORT` vars below. One of `REDIS_URL` or `REDIS_ENDPOINT` is required when `TOKEN_STORE=redis`. |
 | `REDIS_ENDPOINT` | No | — | Redis primary/writer host, used to build the connection URL when `REDIS_URL` is unset (e.g., an AWS ElastiCache Serverless endpoint). Only the writer endpoint is used — the token store needs read-after-write consistency, so a reader/replica endpoint must not be configured here. |
@@ -187,6 +189,8 @@ The browser-based SSO flow opens automatically on the first tool use, prompting 
 
 **\* Required when `AUTH_MODE=oidc`; not used in token mode.*
 **† Provide the client secret via *exactly one* of these two; if neither is set, startup fails closed.*
+**‡ Explicit mode only. Setting any of these with `ARGOCD_MCP_OIDC_CLIENT_MODE=derived` fails startup.*
+**§ Derived mode only. SECURITY: `server.secretkey` also signs ArgoCD session JWTs — derived mode places the MCP server in the same trust tier as the ArgoCD API server. See `deploy/derived-mode.yaml`.*
 
 ## Token Store Modes
 
