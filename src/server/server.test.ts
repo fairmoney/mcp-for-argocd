@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createServer } from './server.js';
+import { createServer, buildServerIdentity } from './server.js';
 import { TokenRegistry } from './tokenRegistry.js';
 
 // These tests exercise the per-call token-resolution boundary in resolveClient
@@ -259,4 +259,35 @@ test('with no default token, an overridden URL still resolves only from the regi
   const result = await callTool(server, 'list_applications', { argocdBaseUrl: EVIL_BASE_URL });
   assert.equal(result.isError, true);
   assert.match(textOf(result), /Missing required ArgoCD API token/);
+});
+
+// --- multi-instance identity (MCP_INSTANCE_NAME) ---
+
+test('buildServerIdentity defaults to the package name with no instructions', () => {
+  const id = buildServerIdentity('https://argocd.example.com', {});
+  assert.equal(id.name, 'argocd-mcp');
+  assert.equal(id.instructions, undefined);
+});
+
+test('buildServerIdentity suffixes MCP_INSTANCE_NAME and emits environment instructions', () => {
+  const id = buildServerIdentity('https://argocd-prod.example.com', {
+    MCP_INSTANCE_NAME: '  prod \n'
+  });
+  assert.equal(id.name, 'argocd-mcp-prod');
+  assert.match(id.instructions ?? '', /"prod" instance/);
+  assert.match(id.instructions ?? '', /https:\/\/argocd-prod\.example\.com/);
+});
+
+test('buildServerIdentity notes read-only mode in the instructions', () => {
+  const id = buildServerIdentity('https://argocd-prod.example.com', {
+    MCP_INSTANCE_NAME: 'prod',
+    MCP_READ_ONLY: 'true'
+  });
+  assert.match(id.instructions ?? '', /read-only/i);
+});
+
+test('buildServerIdentity omits the target sentence when no base URL is configured', () => {
+  const id = buildServerIdentity('', { MCP_INSTANCE_NAME: 'prod' });
+  assert.equal(id.name, 'argocd-mcp-prod');
+  assert.doesNotMatch(id.instructions ?? '', /https?:\/\//);
 });

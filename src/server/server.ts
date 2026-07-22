@@ -48,6 +48,35 @@ type ArgoCDArgs = {
   argocdBaseUrl?: string;
 };
 
+// In-band identity for multi-instance fleets. When several ArgoCD MCP servers
+// are registered with one client (one per cluster/environment), their
+// serverInfo would otherwise be identical clones and the model could only tell
+// them apart by the client-side registration alias. MCP_INSTANCE_NAME suffixes
+// the advertised server name and emits an `instructions` string — delivered in
+// the MCP initialize handshake, so it reaches the model's context no matter
+// how the registration is named.
+export const buildServerIdentity = (
+  argocdBaseUrl: string,
+  env: NodeJS.ProcessEnv = process.env
+): { name: string; instructions?: string } => {
+  const instance = (env.MCP_INSTANCE_NAME ?? '').trim();
+  if (!instance) return { name: packageJSON.name };
+  const readOnly =
+    String(env.MCP_READ_ONLY ?? '')
+      .trim()
+      .toLowerCase() === 'true';
+  const target = argocdBaseUrl ? ` It manages the ArgoCD at ${argocdBaseUrl}.` : '';
+  const readOnlyNote = readOnly
+    ? ' This instance is read-only: mutating tools are not registered.'
+    : '';
+  return {
+    name: `${packageJSON.name}-${instance}`,
+    instructions:
+      `This ArgoCD MCP server is the "${instance}" instance.${target}${readOnlyNote}` +
+      ` If multiple ArgoCD MCP servers are registered, use this one only for requests targeting the "${instance}" environment.`
+  };
+};
+
 // Map over items with a bounded number of in-flight promises, preserving input
 // order. An unbounded Promise.all over a large resource tree buffers every
 // response body at once (a memory spike proportional to the app size and a
@@ -86,10 +115,11 @@ export class Server extends McpServer {
   private clientCache = new Map<string, ArgoCDClient>();
 
   constructor(serverInfo: ServerInfo) {
-    super({
-      name: packageJSON.name,
-      version: packageJSON.version
-    });
+    const identity = buildServerIdentity(serverInfo.argocdBaseUrl);
+    super(
+      { name: identity.name, version: packageJSON.version },
+      identity.instructions ? { instructions: identity.instructions } : undefined
+    );
     this.defaultBaseUrl = serverInfo.argocdBaseUrl;
     this.defaultApiToken = serverInfo.argocdApiToken;
     this.tokenRegistry = serverInfo.tokenRegistry ?? tokenRegistryFromEnv();

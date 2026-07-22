@@ -269,6 +269,16 @@ By default, all the tools will be available, except `patch_resource` and `delete
 
 `MCP_READ_ONLY=true` still wins: in read-only mode these tools are never registered. ArgoCD RBAC also still applies server-side, so the API token used must be allowed to perform the underlying actions.
 
+### Multiple Instances (one MCP per ArgoCD/cluster)
+
+When a fleet runs one MCP server per cluster (each with its own ArgoCD, Dex, and Redis) and several of them are registered with the same client, every instance advertises identical `serverInfo` by default — the model can only tell them apart by the client-side registration alias. Set `MCP_INSTANCE_NAME` to give each instance an in-band identity:
+
+```
+"MCP_INSTANCE_NAME": "prod"
+```
+
+This suffixes the advertised server name (`argocd-mcp-prod`) and sends an `instructions` string in the MCP initialize handshake naming the instance, its ArgoCD base URL, and (when `MCP_READ_ONLY=true`) its read-only status — so the environment identity reaches the model regardless of how the registration was named. Recommended together with environment-scoped registration aliases (e.g. `claude mcp add argocd-prod ...`) and `MCP_READ_ONLY=true` on production instances.
+
 ### Stateless Mode
 
 By default, the HTTP transport assigns a session ID to each client connection and keeps an in-memory map of active sessions. This works well for single-instance deployments but causes `400` errors when multiple replicas are running without sticky sessions, because a request routed to a different pod will not find the session that was created on the original pod.

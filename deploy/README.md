@@ -172,6 +172,7 @@ The browser-based SSO flow opens automatically on the first tool use, prompting 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `AUTH_MODE` | No | `token` | Set to `oidc` to enable SSO mode. |
+| `MCP_INSTANCE_NAME` | No | — | Environment label for multi-instance fleets (e.g. `prod`, `nonprod-v10`). Suffixes the advertised MCP server name (`argocd-mcp-prod`) and emits an `instructions` string in the MCP initialize handshake identifying the instance and its ArgoCD, so models can tell same-named instances apart. |
 | `ARGOCD_MCP_OIDC_CLIENT_MODE` | No | `explicit` | OIDC client mode. `explicit` uses a dedicated `argocd-mcp` Dex static client. `derived` reuses ArgoCD's own `argo-cd` client: the secret is derived from `argocd-secret`'s `server.secretkey` and the callback moves to `/auth/callback`. Requires ArgoCD's bundled Dex. |
 | `ARGOCD_SERVER_SECRETKEY` | Yes*§ | — | ArgoCD's `server.secretkey` provided directly as an env var (e.g., via a Kubernetes `secretKeyRef` to `argocd-secret`). Trimmed on read. Takes precedence over `..._FILE` when both are set and non-blank. |
 | `ARGOCD_SERVER_SECRETKEY_FILE` | Yes*§ | — | Path to a mounted copy of `argocd-secret`'s `server.secretkey` (mount only that key via `items:`). Used as the fallback when `ARGOCD_SERVER_SECRETKEY` is unset or blank. |
