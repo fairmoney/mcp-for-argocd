@@ -1,0 +1,49 @@
+# Derived client mode: the MCP server reuses ArgoCD's own "argo-cd" Dex static
+# client instead of a dedicated argocd-mcp client. No dex.config changes and no
+# argocd-mcp-oidc secret are needed. Requires ArgoCD's BUNDLED Dex (with an
+# external oidc.config, use explicit mode + allowedAudiences instead).
+#
+# SECURITY: server.secretkey is also ArgoCD's session-JWT signing key. A pod
+# holding it can mint arbitrary ArgoCD sessions, so this places the MCP server
+# in the same trust tier as the ArgoCD API server. Mount ONLY that key (items:)
+# — never the whole argocd-secret.
+#
+# 1) Register the MCP callback on the argo-cd Dex client by adding the MCP
+#    public URL to argocd-cm additionalUrls (ArgoCD then registers
+#    <url>/auth/callback as a redirect URI):
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+data:
+  additionalUrls: |
+    - https://argocd-mcp.example.com
+---
+# 2) Patch for the MCP Deployment (replaces the explicit-client env and the
+#    oidc-secret volume in mcp-deployment.yaml). Simplest form — inject the key
+#    directly with a secretKeyRef (no volume needed):
+#
+#    env:
+#      - { name: AUTH_MODE, value: oidc }
+#      - { name: ARGOCD_MCP_OIDC_CLIENT_MODE, value: derived }
+#      - name: ARGOCD_SERVER_SECRETKEY
+#        valueFrom:
+#          secretKeyRef: { name: argocd-secret, key: server.secretkey }
+#
+#    Alternatively, mount the key as a file (keeps the value off the pod-spec
+#    env surface) and point ARGOCD_SERVER_SECRETKEY_FILE at it:
+#
+#    env:
+#      - { name: AUTH_MODE, value: oidc }
+#      - { name: ARGOCD_MCP_OIDC_CLIENT_MODE, value: derived }
+#      - { name: ARGOCD_SERVER_SECRETKEY_FILE, value: /secrets/argocd/server.secretkey }
+#    volumeMounts:
+#      - { name: argocd-server-secretkey, mountPath: /secrets/argocd, readOnly: true }
+#    volumes:
+#      - name: argocd-server-secretkey
+#        secret:
+#          secretName: argocd-secret
+#          items:
+#            - key: server.secretkey
+#              path: server.secretkey

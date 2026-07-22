@@ -11,5 +11,7 @@ export type V1alpha1ResourceAction = ArgoCD.V1alpha1ResourceAction;
 export type V1alpha1ResourceDiff = ArgoCD.V1alpha1ResourceDiff;
 export type V1alpha1ResourceResult = ArgoCD.V1alpha1ResourceResult;
 export type V1alpha1ApplicationResourceResult = ArgoCD.ApplicationApplicationResourceResponse;
+export type ApplicationApplicationResponse = ArgoCD.ApplicationApplicationResponse;
+export type ApplicationOperationTerminateResponse = ArgoCD.ApplicationOperationTerminateResponse;
 export type V1alpha1Cluster = ArgoCD.V1alpha1Cluster;
 export type V1alpha1ClusterList = ArgoCD.V1alpha1ClusterList;

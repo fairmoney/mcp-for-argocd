@@ -10,6 +10,7 @@ import {
   ResourceRefSchema
 } from '../shared/models/schema.js';
 import { TokenRegistry, tokenRegistryFromEnv } from './tokenRegistry.js';
+import { type TokenSource } from '../argocd/http.js';
 
 type ServerInfo = {
   argocdBaseUrl: string;
@@ -17,6 +18,13 @@ type ServerInfo = {
   // Optional registry mapping additional ArgoCD base URLs to their tokens. When
   // omitted, it is loaded from the ARGOCD_TOKEN_REGISTRY_PATH env var.
   tokenRegistry?: TokenRegistry;
+  // When true (oidc mode), ignore the per-call argocdBaseUrl argument and
+  // always target argocdBaseUrl. Prevents a caller (or a prompt-injected
+  // model) from redirecting a user's ArgoCD token to an arbitrary host.
+  pinBaseUrl?: boolean;
+  // When set (oidc mode), build the ArgoCD client with this refreshable
+  // bearer-token source instead of the static argocdApiToken string.
+  tokenSource?: TokenSource;
 };
 
 // Per-call argument that any tool may accept to target a specific ArgoCD
@@ -40,28 +48,95 @@ type ArgoCDArgs = {
   argocdBaseUrl?: string;
 };
 
+// In-band identity for multi-instance fleets. When several ArgoCD MCP servers
+// are registered with one client (one per cluster/environment), their
+// serverInfo would otherwise be identical clones and the model could only tell
+// them apart by the client-side registration alias. MCP_INSTANCE_NAME suffixes
+// the advertised server name and emits an `instructions` string — delivered in
+// the MCP initialize handshake, so it reaches the model's context no matter
+// how the registration is named.
+export const buildServerIdentity = (
+  argocdBaseUrl: string,
+  env: NodeJS.ProcessEnv = process.env
+): { name: string; instructions?: string } => {
+  const instance = (env.MCP_INSTANCE_NAME ?? '').trim();
+  if (!instance) return { name: packageJSON.name };
+  const readOnly =
+    String(env.MCP_READ_ONLY ?? '')
+      .trim()
+      .toLowerCase() === 'true';
+  const target = argocdBaseUrl ? ` It manages the ArgoCD at ${argocdBaseUrl}.` : '';
+  const readOnlyNote = readOnly
+    ? ' This instance is read-only: mutating tools are not registered.'
+    : '';
+  return {
+    name: `${packageJSON.name}-${instance}`,
+    instructions:
+      `This ArgoCD MCP server is the "${instance}" instance.${target}${readOnlyNote}` +
+      ` If multiple ArgoCD MCP servers are registered, use this one only for requests targeting the "${instance}" environment.`
+  };
+};
+
+// Map over items with a bounded number of in-flight promises, preserving input
+// order. An unbounded Promise.all over a large resource tree buffers every
+// response body at once (a memory spike proportional to the app size and a
+// thundering herd against ArgoCD); a worker pool caps peak in-flight work.
+const MAX_RESOURCE_FETCH_CONCURRENCY = 8;
+
+const mapWithConcurrency = async <T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> => {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  };
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+};
+
 export class Server extends McpServer {
   private defaultBaseUrl: string;
   private defaultApiToken: string;
   private tokenRegistry: TokenRegistry;
   private argocdClient: ArgoCDClient;
+  // See ServerInfo.pinBaseUrl / ServerInfo.tokenSource.
+  private pinBaseUrl: boolean;
+  private tokenSource: TokenSource;
   // Cache per-credential clients to avoid rebuilding the HttpClient on every
   // call. Keyed by baseUrl + token, since the same base URL may resolve to
   // different tokens (request token vs. registry token vs. default).
   private clientCache = new Map<string, ArgoCDClient>();
 
   constructor(serverInfo: ServerInfo) {
-    super({
-      name: packageJSON.name,
-      version: packageJSON.version
-    });
+    const identity = buildServerIdentity(serverInfo.argocdBaseUrl);
+    super(
+      { name: identity.name, version: packageJSON.version },
+      identity.instructions ? { instructions: identity.instructions } : undefined
+    );
     this.defaultBaseUrl = serverInfo.argocdBaseUrl;
     this.defaultApiToken = serverInfo.argocdApiToken;
     this.tokenRegistry = serverInfo.tokenRegistry ?? tokenRegistryFromEnv();
-    this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
+    this.pinBaseUrl = serverInfo.pinBaseUrl ?? false;
+    this.tokenSource = serverInfo.tokenSource ?? serverInfo.argocdApiToken;
+    this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, this.tokenSource);
 
     const isReadOnly =
       String(process.env.MCP_READ_ONLY ?? '')
+        .trim()
+        .toLowerCase() === 'true';
+
+    // patch_resource and delete_resource modify live cluster resources directly,
+    // bypassing GitOps, so they require an explicit opt-in on top of the
+    // read-only gate. ArgoCD RBAC still applies server-side.
+    const resourceMutationsEnabled =
+      String(process.env.MCP_ENABLE_RESOURCE_MUTATIONS ?? '')
         .trim()
         .toLowerCase() === 'true';
 
@@ -245,8 +320,8 @@ export class Server extends McpServer {
               namespace: node.namespace!
             })) || [];
         }
-        return Promise.all(
-          refs.map((ref) => client.getResource(applicationName, applicationNamespace, ref))
+        return mapWithConcurrency(refs, MAX_RESOURCE_FETCH_CONCURRENCY, (ref) =>
+          client.getResource(applicationName, applicationNamespace, ref)
         );
       }
     );
@@ -372,6 +447,92 @@ export class Server extends McpServer {
             action
           )
       );
+      this.addJsonOutputTool(
+        'terminate_operation',
+        'terminate_operation terminates the currently running sync operation of an application. Use when an application is stuck Terminating or Running on a hung operation (e.g. "operation is terminating due to timeout") — the app controller will not process a cascade delete or a new sync until the current operation terminates.',
+        {
+          applicationName: z.string(),
+          applicationNamespace: ApplicationNamespaceSchema.optional().describe(
+            'The namespace where the application is located. Required if application is not in the default namespace.'
+          )
+        },
+        async ({ applicationName, applicationNamespace }, client) =>
+          await client.terminateOperation(applicationName, applicationNamespace)
+      );
+
+      // Resource-level escape hatches: these modify live cluster resources
+      // directly, bypassing GitOps, so they require an explicit opt-in via
+      // MCP_ENABLE_RESOURCE_MUTATIONS=true in addition to not being read-only.
+      if (resourceMutationsEnabled) {
+        this.addJsonOutputTool(
+          'patch_resource',
+          'patch_resource patches a live resource managed by an application. WARNING: this modifies live cluster resources directly, bypassing GitOps — the change is not reflected in git and may be reverted by the next sync. Typical use: removing stuck finalizers with a merge patch of {"metadata":{"finalizers":null}}.',
+          {
+            applicationName: z.string(),
+            applicationNamespace: ApplicationNamespaceSchema.optional().describe(
+              'The namespace where the application is located. Required if application is not in the default namespace.'
+            ),
+            resourceRef: ResourceRefSchema,
+            patch: z
+              .string()
+              .describe(
+                'The patch body as a JSON string, e.g. \'{"metadata":{"finalizers":null}}\''
+              ),
+            patchType: z
+              .string()
+              .default('application/merge-patch+json')
+              .describe(
+                'The patch content type: "application/merge-patch+json" (default) or "application/json-patch+json"'
+              )
+          },
+          async (
+            { applicationName, applicationNamespace, resourceRef, patch, patchType },
+            client
+          ) =>
+            await client.patchResource(
+              applicationName,
+              applicationNamespace,
+              resourceRef as V1alpha1ResourceResult,
+              patch,
+              patchType
+            )
+        );
+        this.addJsonOutputTool(
+          'delete_resource',
+          'delete_resource deletes a single live resource managed by an application. WARNING: force=true performs a foreground force delete that can orphan external/cloud resources managed by operators (e.g. Crossplane) — the operator never gets to run its cleanup. Use orphan=true to remove the resource from ArgoCD tracking without deleting it from the cluster.',
+          {
+            applicationName: z.string(),
+            applicationNamespace: ApplicationNamespaceSchema.optional().describe(
+              'The namespace where the application is located. Required if application is not in the default namespace.'
+            ),
+            resourceRef: ResourceRefSchema,
+            force: z
+              .boolean()
+              .optional()
+              .describe(
+                'Foreground force delete. Can orphan external/cloud resources managed by operators (e.g. Crossplane); use with care.'
+              ),
+            orphan: z
+              .boolean()
+              .optional()
+              .describe(
+                'Remove the resource from ArgoCD tracking without deleting it from the cluster.'
+              )
+          },
+          async ({ applicationName, applicationNamespace, resourceRef, force, orphan }, client) => {
+            const options: { force?: boolean; orphan?: boolean } = {};
+            if (force !== undefined) options.force = force;
+            if (orphan !== undefined) options.orphan = orphan;
+
+            return await client.deleteResource(
+              applicationName,
+              applicationNamespace,
+              resourceRef as V1alpha1ResourceResult,
+              Object.keys(options).length > 0 ? options : undefined
+            );
+          }
+        );
+      }
     }
   }
 
@@ -389,6 +550,17 @@ export class Server extends McpServer {
   // own token, without the token ever appearing in a tool-call payload: callers
   // pass only the (non-secret) base URL and the server pairs it with the token.
   private resolveClient(args: ArgoCDArgs): ArgoCDClient {
+    // In oidc mode the base URL is pinned to the configured default and the
+    // per-call override is ignored (a user's token must never be redirected to
+    // an arbitrary host). The token comes from the refreshable session source
+    // already wired into this.argocdClient in the constructor.
+    if (this.pinBaseUrl) {
+      if (!this.defaultBaseUrl) {
+        throw new Error('oidc mode requires a configured ARGOCD_BASE_URL');
+      }
+      return this.argocdClient;
+    }
+
     const baseUrl = args.argocdBaseUrl || this.defaultBaseUrl;
 
     // The base URL is optional at the session level; when no default is

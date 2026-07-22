@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "description": "Argo CD MCP Server",
   "packageManager": "pnpm@10.34.1",
+  "engines": {
+    "node": ">=24"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/argoproj-labs/mcp-for-argocd.git"
@@ -51,7 +54,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "dotenv": "^16.5.0",
-    "express": "^5.1.0",
+    "express": "^5.2.1",
+    "ioredis": "^5.11.1",
     "pino": "^9.6.0",
     "yargs": "^17.7.2",
     "zod": "^3.25.0"
@@ -60,16 +64,68 @@
     "@dtsgenerator/replace-namespace": "^1.7.0",
     "@eslint/js": "^9.25.0",
     "@types/express": "^5.0.1",
+    "@types/ioredis-mock": "^8.2.7",
     "@types/node": "^22.14.1",
     "@types/yargs": "^17.0.33",
     "dtsgenerator": "^3.19.2",
     "eslint": "^9.25.0",
     "eslint-config-prettier": "^10.1.2",
     "eslint-plugin-prettier": "^5.2.6",
+    "ioredis-mock": "^8.13.1",
     "prettier": "3.5.3",
     "tsup": "^8.4.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.30.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "qs": "^6.15.2",
+      "body-parser": "^2.2.1",
+      "path-to-regexp": "^8.4.0",
+      "hono": "^4.12.25",
+      "fast-uri": "^3.1.2",
+      "ip-address": "^10.1.1",
+      "rollup": "^4.59.0",
+      "flatted": "^3.4.2",
+      "@eslint/plugin-kit": "^0.3.4",
+      "js-yaml": "^4.2.0",
+      "glob": "^10.5.0",
+      "glob>minimatch": "^9.0.7",
+      "@typescript-eslint/typescript-estree>minimatch": "^9.0.7",
+      "minimatch@9>brace-expansion": "^2.0.3",
+      "eslint>ajv": "^6.14.0",
+      "eslint>minimatch": "^3.1.4",
+      "minimatch@3>brace-expansion": "^1.1.13",
+      "micromatch>picomatch": "^2.3.2",
+      "tinyglobby>picomatch": "^4.0.4",
+      "esbuild": "^0.28.1"
+    }
+  },
+  "overrides": {
+    "qs": "^6.15.2",
+    "body-parser": "^2.2.1",
+    "path-to-regexp": "^8.4.0",
+    "hono": "^4.12.25",
+    "fast-uri": "^3.1.2",
+    "ip-address": "^10.1.1",
+    "rollup": "^4.59.0",
+    "flatted": "^3.4.2",
+    "@eslint/plugin-kit": "^0.3.4",
+    "js-yaml": "^4.2.0",
+    "glob": {
+      ".": "^10.5.0",
+      "minimatch": { "brace-expansion": "^2.0.3", ".": "^9.0.7" }
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "^9.0.7"
+    },
+    "eslint": {
+      "ajv": "^6.14.0",
+      "minimatch": { "brace-expansion": "^1.1.13", ".": "^3.1.4" }
+    },
+    "micromatch": { "picomatch": "^2.3.2" },
+    "tinyglobby": { "picomatch": "^4.0.4" },
+    "esbuild": "^0.28.1"
   }
 }
