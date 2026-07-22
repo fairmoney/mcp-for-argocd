@@ -1,0 +1,26 @@
+# Add to the argocd-cm ConfigMap under data.dex\.config. This registers a
+# dedicated confidential OAuth client for the MCP server whose redirect URI is
+# the MCP server's public ingress callback.
+#
+# The client secret must also be present in the argocd-secret Secret under the
+# key referenced by $oidc.argocd-mcp.clientSecret, and mounted into the MCP
+# server (see mcp-deployment.yaml) at ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE.
+#
+# NOTE: this file is only needed in explicit client mode
+# (ARGOCD_MCP_OIDC_CLIENT_MODE unset or "explicit"). Derived mode needs no
+# dex.config changes — see deploy/derived-mode.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+data:
+  dex.config: |
+    connectors:
+      # ... your existing upstream IdP connector(s) ...
+    staticClients:
+      - id: argocd-mcp
+        name: ArgoCD MCP
+        secret: $oidc.argocd-mcp.clientSecret
+        redirectURIs:
+          - https://argocd-mcp.example.com/oauth/callback

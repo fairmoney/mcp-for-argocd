@@ -47,6 +47,7 @@ The server provides the following ArgoCD management tools:
 - `update_application`: Update an existing application
 - `delete_application`: Delete an application
 - `sync_application`: Trigger a sync operation on an application
+- `terminate_operation`: Terminate the currently running sync operation of an application (e.g. when an app is stuck on a hung operation before a cascade delete can proceed)
 
 ### Resource Management
 - `get_application_resource_tree`: Get the resource tree for a specific application
@@ -55,6 +56,8 @@ The server provides the following ArgoCD management tools:
 - `get_resource_events`: Get events for resources managed by an application
 - `get_resource_actions`: Get available actions for resources
 - `run_resource_action`: Run an action on a resource
+- `patch_resource`: Patch a live resource directly, bypassing GitOps (e.g. remove stuck finalizers) — requires `MCP_ENABLE_RESOURCE_MUTATIONS=true`
+- `delete_resource`: Delete a single live resource managed by an application — requires `MCP_ENABLE_RESOURCE_MUTATIONS=true`
 
 ## Installation
 
@@ -250,8 +253,31 @@ This will disable the following tools:
 - `delete_application`
 - `sync_application`
 - `run_resource_action`
+- `terminate_operation`
+- `patch_resource`
+- `delete_resource`
 
-By default, all the tools will be available.
+By default, all the tools will be available, except `patch_resource` and `delete_resource` which additionally require `MCP_ENABLE_RESOURCE_MUTATIONS=true` (see below).
+
+### Resource Mutations (`patch_resource` / `delete_resource`)
+
+`patch_resource` and `delete_resource` modify live cluster resources directly, bypassing GitOps: the change is not reflected in git and may be reverted (or compounded) by the next sync. They are intended as escape hatches for operational incidents — e.g. removing a stuck finalizer with a merge patch of `{"metadata":{"finalizers":null}}`, or deleting a single wedged resource. Because of this, they are disabled by default and require an explicit opt-in:
+
+```
+"MCP_ENABLE_RESOURCE_MUTATIONS": "true"
+```
+
+`MCP_READ_ONLY=true` still wins: in read-only mode these tools are never registered. ArgoCD RBAC also still applies server-side, so the API token used must be allowed to perform the underlying actions.
+
+### Multiple Instances (one MCP per ArgoCD/cluster)
+
+When a fleet runs one MCP server per cluster (each with its own ArgoCD, Dex, and Redis) and several of them are registered with the same client, every instance advertises identical `serverInfo` by default — the model can only tell them apart by the client-side registration alias. Set `MCP_INSTANCE_NAME` to give each instance an in-band identity:
+
+```
+"MCP_INSTANCE_NAME": "prod"
+```
+
+This suffixes the advertised server name (`argocd-mcp-prod`) and sends an `instructions` string in the MCP initialize handshake naming the instance, its ArgoCD base URL, and (when `MCP_READ_ONLY=true`) its read-only status — so the environment identity reaches the model regardless of how the registration was named. Recommended together with environment-scoped registration aliases (e.g. `claude mcp add argocd-prod ...`) and `MCP_READ_ONLY=true` on production instances.
 
 ### Stateless Mode
 
@@ -276,6 +302,40 @@ In stateless mode:
 - `GET /mcp` and `DELETE /mcp` return `405 Method Not Allowed` (session-level SSE and termination are not supported)
 
 This mode is recommended for Kubernetes deployments with Horizontal Pod Autoscaling (HPA) where network-level sticky sessions are not available.
+
+### SSO (oidc) Mode
+
+ArgoCD MCP supports federated authentication via ArgoCD's Dex OIDC provider. In oidc mode, the server runs as an HTTP service behind an Ingress and exchanges authorization codes with Dex for access tokens, eliminating the need for static API tokens. This mode is opt-in and is enabled by setting `AUTH_MODE=oidc`.
+
+**Browser OAuth flow:**
+When a client initiates a session, the server redirects to Dex for user authentication. Dex authenticates the user against your upstream identity provider (LDAP, GitHub, SAML, etc.) and returns an authorization code to the MCP server's callback endpoint (`https://<mcp-ingress>/oauth/callback`). The server exchanges this code for an access token at Dex's token endpoint using a pre-registered confidential client. The token is stored (in memory or Redis) and refreshed on-demand, ensuring seamless authentication without exposing Dex credentials to the user.
+
+**Client modes:** By default the server uses a dedicated confidential Dex client (`argocd-mcp`, explicit mode) — note that with ArgoCD's *bundled* Dex, the API server only accepts token audiences `argo-cd`/`argo-cd-cli`, so explicit mode requires an external `oidc.config` with `allowedAudiences`. Alternatively, set `ARGOCD_MCP_OIDC_CLIENT_MODE=derived` to reuse ArgoCD's own `argo-cd` client: the client secret is derived from `argocd-secret`'s `server.secretkey` exactly as ArgoCD derives it, the callback moves to `/auth/callback`, and the MCP public URL must be listed in `argocd-cm`'s `additionalUrls`. Tokens then carry `aud: argo-cd` and are accepted natively. See `deploy/derived-mode.yaml` for the trust-tier caveat.
+
+**Environment variables:**
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `AUTH_MODE` | No | `token` | Set to `oidc` to enable SSO mode. |
+| `ARGOCD_MCP_OIDC_CLIENT_MODE` | No | `explicit` | `explicit` (dedicated `argocd-mcp` client) or `derived` (reuse ArgoCD's `argo-cd` client; secret derived from `server.secretkey`; callback `/auth/callback`; bundled Dex only). |
+| `ARGOCD_SERVER_SECRETKEY` | Yes*§ | — | Derived mode only: `argocd-secret`'s `server.secretkey` provided directly (e.g., via `secretKeyRef`). Takes precedence over `..._FILE`. |
+| `ARGOCD_SERVER_SECRETKEY_FILE` | Yes*§ | — | Derived mode only: path to a mounted copy of `argocd-secret`'s `server.secretkey`. Fallback when `ARGOCD_SERVER_SECRETKEY` is unset or blank. |
+| `MCP_PUBLIC_URL` | Yes* | — | Public HTTPS URL of the MCP server (e.g., `https://argocd-mcp.example.com`). Must be HTTPS; used to construct the OAuth callback URL. |
+| `ARGOCD_BASE_URL` | Yes* | — | ArgoCD server URL (http or https); used for token validation. |
+| `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | OIDC client ID registered with Dex. No default (required in oidc mode); conventional/example value: `argocd-mcp`. |
+| `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE` | Yes* | — | Path to a file containing the OIDC client secret (e.g., `/secrets/oidc/clientSecret`). |
+| `TOKEN_STORE` | No | `memory` | Token storage: `memory` (single-replica) or `redis` (horizontally scalable; requires Redis >= 6.2). |
+| `REDIS_URL` | No | — | Redis connection URL (required if `TOKEN_STORE=redis`). |
+| `TOKEN_STORE_ENCRYPTION_KEY_FILE` | No | — | Path to a 32-byte AES-256 key file for at-rest token encryption (optional). |
+
+**\* Required when `AUTH_MODE=oidc`; not used in token mode.*
+**§ Derived mode only (forbidden otherwise); provide the key via *exactly one* of these two (the direct env var wins when both are set). `server.secretkey` also signs ArgoCD session JWTs — see `deploy/derived-mode.yaml`.*
+
+**Single-replica in-memory store:** If using `TOKEN_STORE=memory` (the default), set `replicas: 1` in the Deployment spec — multiple replicas without sticky sessions will cause inconsistent state and 400 errors.
+
+**Multi-replica Redis store (production):** For horizontally scalable deployments, set `TOKEN_STORE=redis` and point `REDIS_URL` to a managed or in-cluster Redis instance (version >= 6.2 required for atomic `GETDEL` operations).
+
+For full deployment instructions, see [`deploy/README.md`](deploy/README.md).
 
 ## For Development
 

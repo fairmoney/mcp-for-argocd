@@ -8,19 +8,19 @@ import {
   V1alpha1ResourceDiff,
   V1alpha1ResourceResult,
   V1alpha1ApplicationResourceResult,
-  V1alpha1ClusterList
+  V1alpha1ClusterList,
+  ApplicationApplicationResponse,
+  ApplicationOperationTerminateResponse
 } from '../types/argocd-types.js';
-import { HttpClient } from './http.js';
+import { HttpClient, type TokenSource } from './http.js';
 
 export class ArgoCDClient {
   private baseUrl: string;
-  private apiToken: string;
   private client: HttpClient;
 
-  constructor(baseUrl: string, apiToken: string) {
+  constructor(baseUrl: string, token: TokenSource) {
     this.baseUrl = baseUrl;
-    this.apiToken = apiToken;
-    this.client = new HttpClient(this.baseUrl, this.apiToken);
+    this.client = new HttpClient(this.baseUrl, token);
   }
 
   public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {
@@ -29,39 +29,40 @@ export class ArgoCDClient {
       params?.search ? { search: params.search } : undefined
     );
 
-    // Strip heavy fields to reduce token usage
-    const strippedItems =
-      body.items?.map((app) => ({
-        metadata: {
-          name: app.metadata?.name,
-          namespace: app.metadata?.namespace,
-          labels: app.metadata?.labels,
-          creationTimestamp: app.metadata?.creationTimestamp
-        },
-        spec: {
-          project: app.spec?.project,
-          source: app.spec?.source,
-          destination: app.spec?.destination
-        },
-        status: {
-          sync: app.status?.sync,
-          health: app.status?.health,
-          summary: app.status?.summary
-        }
-      })) ?? [];
-
-    // Apply pagination
+    // ArgoCD's list endpoint has no server-side limit/offset, so the full list
+    // is always fetched. Paginate the RAW items FIRST, then strip heavy fields
+    // from only the returned page — building a stripped copy of every app (the
+    // old order) meant peak memory ignored `limit`.
+    const rawItems = body.items ?? [];
+    const totalItems = rawItems.length;
     const start = params?.offset ?? 0;
-    const end = params?.limit ? start + params.limit : strippedItems.length;
-    const items = strippedItems.slice(start, end);
+    const end = params?.limit ? start + params.limit : totalItems;
+    const items = rawItems.slice(start, end).map((app) => ({
+      metadata: {
+        name: app.metadata?.name,
+        namespace: app.metadata?.namespace,
+        labels: app.metadata?.labels,
+        creationTimestamp: app.metadata?.creationTimestamp
+      },
+      spec: {
+        project: app.spec?.project,
+        source: app.spec?.source,
+        destination: app.spec?.destination
+      },
+      status: {
+        sync: app.status?.sync,
+        health: app.status?.health,
+        summary: app.status?.summary
+      }
+    }));
 
     return {
       items,
       metadata: {
         resourceVersion: body.metadata?.resourceVersion,
-        totalItems: strippedItems.length,
+        totalItems,
         returnedItems: items.length,
-        hasMore: end < strippedItems.length
+        hasMore: end < totalItems
       }
     };
   }
@@ -331,6 +332,72 @@ export class ArgoCDClient {
         version: resourceRef.version
       },
       action
+    );
+    return body;
+  }
+
+  public async patchResource(
+    applicationName: string,
+    applicationNamespace: string | undefined,
+    resourceRef: V1alpha1ResourceResult,
+    patch: string,
+    patchType: string
+  ) {
+    const queryParams: Record<string, string | undefined> = {
+      namespace: resourceRef.namespace,
+      resourceName: resourceRef.name,
+      group: resourceRef.group,
+      kind: resourceRef.kind,
+      version: resourceRef.version,
+      patchType
+    };
+    if (applicationNamespace) {
+      queryParams.appNamespace = applicationNamespace;
+    }
+    // The API takes the patch as a JSON-encoded string body (like the action
+    // name in runResourceAction), so the patch string is passed through as-is.
+    const { body } = await this.client.post<string, V1alpha1ApplicationResourceResult>(
+      `/api/v1/applications/${applicationName}/resource`,
+      queryParams,
+      patch
+    );
+    return body;
+  }
+
+  public async deleteResource(
+    applicationName: string,
+    applicationNamespace: string | undefined,
+    resourceRef: V1alpha1ResourceResult,
+    options?: { force?: boolean; orphan?: boolean }
+  ) {
+    const queryParams: Record<string, string | boolean | undefined> = {
+      namespace: resourceRef.namespace,
+      resourceName: resourceRef.name,
+      group: resourceRef.group,
+      kind: resourceRef.kind,
+      version: resourceRef.version
+    };
+    if (applicationNamespace) {
+      queryParams.appNamespace = applicationNamespace;
+    }
+    if (options?.force !== undefined) {
+      queryParams.force = options.force;
+    }
+    if (options?.orphan !== undefined) {
+      queryParams.orphan = options.orphan;
+    }
+    const { body } = await this.client.delete<ApplicationApplicationResponse>(
+      `/api/v1/applications/${applicationName}/resource`,
+      queryParams
+    );
+    return body;
+  }
+
+  public async terminateOperation(applicationName: string, appNamespace?: string) {
+    const queryParams = appNamespace ? { appNamespace } : undefined;
+    const { body } = await this.client.delete<ApplicationOperationTerminateResponse>(
+      `/api/v1/applications/${applicationName}/operation`,
+      queryParams
     );
     return body;
   }
