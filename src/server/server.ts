@@ -143,14 +143,33 @@ export class Server extends McpServer {
     // Always register read/query tools
     this.addJsonOutputTool(
       'list_applications',
-      'list_applications returns list of applications',
+      'list_applications returns a compact summary of applications: name, namespace, project, labels, source, destination, sync status, health status and operation phase. Use get_application for the full Application object.',
       {
         search: z
           .string()
           .optional()
           .describe(
-            'Search applications by name. This is a partial match on the application name and does not support glob patterns (e.g. "*"). Optional.'
+            'Case-insensitive substring match on the application name. Glob patterns (e.g. "*") are not supported. Optional.'
           ),
+        project: z
+          .string()
+          .optional()
+          .describe('Only return applications that belong to this ArgoCD project. Optional.'),
+        selector: z
+          .string()
+          .optional()
+          .describe(
+            'Kubernetes label selector applied to the Application resources, e.g. "team=payments,env!=prod". Optional.'
+          ),
+        repo: z
+          .string()
+          .optional()
+          .describe(
+            'Only return applications whose source repository URL matches exactly. Optional.'
+          ),
+        applicationNamespace: ApplicationNamespaceSchema.optional().describe(
+          'Only return Application resources that live in this namespace. Optional.'
+        ),
         limit: z
           .number()
           .int()
@@ -168,9 +187,13 @@ export class Server extends McpServer {
             'Number of applications to skip before returning results. Use with limit for pagination. Optional.'
           )
       },
-      async ({ search, limit, offset }, client) =>
+      async ({ search, project, selector, repo, applicationNamespace, limit, offset }, client) =>
         await client.listApplications({
-          search: search ?? undefined,
+          search,
+          project,
+          selector,
+          repo,
+          appNamespace: applicationNamespace,
           limit,
           offset
         })

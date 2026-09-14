@@ -44,7 +44,7 @@ The server provides the following ArgoCD management tools:
 - `get_appproject`: Get detailed information about a specific AppProject (project)
 
 ### Application Management
-- `list_applications`: List and filter all applications
+- `list_applications`: List applications as a compact summary (name, project, source, destination, sync and health). Filter by name substring, project, label selector or repository, with `limit`/`offset` pagination
 - `get_application`: Get detailed information about a specific application
 - `create_application`: Create a new application
 - `update_application`: Update an existing application
