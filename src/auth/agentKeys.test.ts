@@ -34,8 +34,16 @@ test('loadAgentApiKeys parses named entries into hash buffers and tokens', () =>
   assert.equal(keys[1].argocdToken, 'argo-token-2');
 });
 
-test('loadAgentApiKeys refuses invalid JSON, naming the variable', () => {
-  assert.throws(() => loadAgentApiKeys(env('{not json')), /AGENT_API_KEYS/);
+test('loadAgentApiKeys refuses invalid JSON, naming the variable but never the input', () => {
+  assert.throws(
+    () => loadAgentApiKeys(env('{"a": {"argocdToken": "SECRET-FRAGMENT" oops')),
+    (e: unknown) => {
+      assert.ok(e instanceof Error);
+      assert.match(e.message, /AGENT_API_KEYS/);
+      assert.doesNotMatch(e.message, /SECRET-FRAGMENT/);
+      return true;
+    }
+  );
 });
 
 test('loadAgentApiKeys refuses a non-object or an empty object', () => {
@@ -44,10 +52,15 @@ test('loadAgentApiKeys refuses a non-object or an empty object', () => {
 });
 
 test('loadAgentApiKeys refuses a name outside [a-z0-9-]', () => {
-  for (const name of ['DevOps', 'devops agent', 'devops_agent', '']) {
+  for (const name of ['DevOps', 'devops agent', 'devops_agent', '', 'amk_pasted-key-by-mistake']) {
     assert.throws(
       () => loadAgentApiKeys(env({ [name]: { keySha256: HASH, argocdToken: 't' } })),
-      /name/,
+      (e: unknown) => {
+        assert.ok(e instanceof Error);
+        assert.match(e.message, /name/);
+        if (name) assert.doesNotMatch(e.message, new RegExp(name.replace(/[-_ ]/g, '.')));
+        return true;
+      },
       `name "${name}" must be refused`
     );
   }

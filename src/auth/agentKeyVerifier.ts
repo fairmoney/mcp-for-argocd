@@ -21,9 +21,11 @@ export interface MachineAuth {
 }
 
 export const machineAuthOf = (auth: AuthInfo): MachineAuth | undefined => {
-  const extra = auth.extra as Partial<MachineAuth> | undefined;
-  if (extra?.kind !== 'apikey') return undefined;
-  return { kind: 'apikey', principal: extra.principal!, argocdToken: extra.argocdToken! };
+  const extra = auth.extra;
+  if (!extra || extra.kind !== 'apikey') return undefined;
+  const { principal, argocdToken } = extra;
+  if (typeof principal !== 'string' || typeof argocdToken !== 'string') return undefined;
+  return { kind: 'apikey', principal, argocdToken };
 };
 
 interface CompositeVerifierOptions {

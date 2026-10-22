@@ -48,8 +48,10 @@ export const loadAgentApiKeys = (env: NodeJS.ProcessEnv = process.env): AgentKey
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch (error) {
-    fail(`invalid JSON (${error instanceof Error ? error.message : String(error)})`);
+  } catch {
+    // Not the parser's message: on Node it quotes a window of the raw input,
+    // which here may hold an ArgoCD token.
+    fail('invalid JSON');
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     fail('expected a JSON object of named entries');
@@ -59,9 +61,11 @@ export const loadAgentApiKeys = (env: NodeJS.ProcessEnv = process.env): AgentKey
 
   const keys: AgentKey[] = [];
   const seenHashes = new Map<string, string>();
-  for (const [name, value] of entries) {
+  for (const [index, [name, value]] of entries.entries()) {
+    // The name is not echoed: an operator who pastes a key where a name goes
+    // must not see it reproduced in the crash log.
     if (!NAME_PATTERN.test(name)) {
-      fail(`entry name "${name}" must match ${NAME_PATTERN}`);
+      fail(`entry #${index + 1}: name must match ${NAME_PATTERN}`);
     }
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
       fail(`entry "${name}" must be an object`);
