@@ -359,8 +359,8 @@ Behaviour:
 
 - A bearer token is routed by its shape, never by header name: a key-shaped token (`amk_` + 64 hex) is hashed and compared against every configured hash in constant time; anything else goes to the OIDC verifier unchanged. An unknown key gets `401`, creates no session and makes no request to ArgoCD.
 - A machine session's base URL is pinned to `ARGOCD_BASE_URL`: `x-argocd-base-url`, the `argocdBaseUrl` tool argument and the token registry are ignored, so a key's ArgoCD token is only ever sent to the configured instance.
-- A session id is only usable by the principal that opened it (an OIDC client id or `apikey:<name>`).
-- Every tool call of a machine session is logged with its principal, the tool name and the outcome (never arguments or results), and the session start is logged with the client address. Keys and tokens are never logged.
+- A session id is only usable by the principal that opened it: the login it came from for an OIDC bearer (not the registered MCP client, which a hosted connector shares between people), or `apikey:<name>` for a key.
+- Every tool call of a machine session is logged with its principal, the tool name and the outcome (never arguments or results; the outcome says whether the call completed, ArgoCD's own 403/404 come back as the result text). The session start is logged with the client address; in [stateless mode](#stateless-mode) that line is emitted per request, with `stateless: true`. Keys and tokens are never logged.
 - Startup refuses invalid JSON, an empty object, a bad name or hash, the same hash under two names, a missing `argocdToken`, and the variable outside `AUTH_MODE=oidc`. Unset means no machine path at all.
 - Rotation: add the new key under a new name, roll the pod, move the caller, remove the old entry. To rotate an ArgoCD token, generate a new one, update the entry, roll the pod, then `argocd account delete-token` the old one.
 

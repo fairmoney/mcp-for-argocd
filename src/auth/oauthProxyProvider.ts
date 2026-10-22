@@ -283,7 +283,10 @@ export class OAuthProxyProvider implements OAuthServerProvider {
         : undefined,
       extra: {
         argocdToken: stored.upstream.accessToken,
-        argocdBaseUrl: this.config.argocdBaseUrl
+        argocdBaseUrl: this.config.argocdBaseUrl,
+        // The login this token belongs to; stable across token refresh, so it
+        // is what an HTTP session is bound to.
+        sessionId: stored.sessionId
       }
     };
   }

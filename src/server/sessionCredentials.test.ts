@@ -2,30 +2,60 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { BearerTokenProvider } from '../argocd/http.js';
-import { resolveSessionCredentials } from './sessionCredentials.js';
+import { resolveSessionCredentials, resolveSessionOwner } from './sessionCredentials.js';
 
-// The oidc /mcp handler builds each session's ArgoCD credentials from the
-// AuthInfo the bearer middleware attached. A machine session uses the static
-// ArgoCD token bound to its key and is owned by "apikey:<name>"; an OIDC
-// session gets the refreshable provider built from its opaque token and is
-// owned by its registered client id.
+// The oidc /mcp handler binds each HTTP session to an owner and, when it
+// creates one, builds its ArgoCD credentials from the AuthInfo the bearer
+// middleware attached. A machine session uses the static ArgoCD token bound
+// to its key and is owned by "apikey:<name>"; an OIDC session gets the
+// refreshable provider for its opaque token and is owned by its login.
 
 const oidcProvider: BearerTokenProvider = {
   current: async () => 'live',
   refresh: async () => 'refreshed'
 };
 
-test('a machine AuthInfo yields the static ArgoCD token, its principal and owner', () => {
-  const auth: AuthInfo = {
-    token: 'amk_key',
-    clientId: 'apikey:devops-agent',
-    scopes: [],
-    expiresAt: 1,
-    extra: { kind: 'apikey', principal: 'apikey:devops-agent', argocdToken: 'argocd-token' }
+const machineAuth: AuthInfo = {
+  token: 'amk_key',
+  clientId: 'apikey:devops-agent',
+  scopes: [],
+  expiresAt: 1,
+  extra: { kind: 'apikey', principal: 'apikey:devops-agent', argocdToken: 'argocd-token' }
+};
+const oidcAuth: AuthInfo = {
+  token: 'opaque-token',
+  clientId: 'client-1',
+  scopes: [],
+  expiresAt: 1,
+  extra: { argocdToken: 'upstream', argocdBaseUrl: 'https://argocd', sessionId: 'login-42' }
+};
+
+test('a machine key is its own owner', () => {
+  assert.equal(resolveSessionOwner(machineAuth), 'apikey:devops-agent');
+});
+
+test('an OIDC bearer is owned by its login, not by the registered client', () => {
+  assert.equal(resolveSessionOwner(oidcAuth), 'oidc:login-42');
+  // Two logins through the same registered client get different owners.
+  const other: AuthInfo = {
+    ...oidcAuth,
+    token: 'other-opaque',
+    extra: { ...oidcAuth.extra, sessionId: 'login-43' }
   };
+  assert.notEqual(resolveSessionOwner(other), resolveSessionOwner(oidcAuth));
+});
+
+test('a token record without a session id falls back to the client id', () => {
+  const legacy: AuthInfo = { ...oidcAuth, extra: { argocdToken: 'upstream' } };
+  assert.equal(resolveSessionOwner(legacy), 'client:client-1');
+  const none: AuthInfo = { ...oidcAuth, extra: undefined };
+  assert.equal(resolveSessionOwner(none), 'client:client-1');
+});
+
+test('a machine AuthInfo yields the static ArgoCD token, its principal and owner', () => {
   let providerBuiltFor: string | undefined;
 
-  const creds = resolveSessionCredentials(auth, (opaque) => {
+  const creds = resolveSessionCredentials(machineAuth, (opaque) => {
     providerBuiltFor = opaque;
     return oidcProvider;
   });
@@ -39,15 +69,14 @@ test('a machine AuthInfo yields the static ArgoCD token, its principal and owner
 });
 
 test('an OIDC AuthInfo yields the refreshable provider for its opaque token and no principal', () => {
-  const auth: AuthInfo = { token: 'opaque-token', clientId: 'client-1', scopes: [], expiresAt: 1 };
   let providerBuiltFor: string | undefined;
 
-  const creds = resolveSessionCredentials(auth, (opaque) => {
+  const creds = resolveSessionCredentials(oidcAuth, (opaque) => {
     providerBuiltFor = opaque;
     return oidcProvider;
   });
 
-  assert.equal(creds.owner, 'client-1');
+  assert.equal(creds.owner, 'oidc:login-42');
   assert.equal(creds.principal, undefined);
   assert.equal(creds.tokenSource, oidcProvider);
   assert.equal(providerBuiltFor, 'opaque-token');

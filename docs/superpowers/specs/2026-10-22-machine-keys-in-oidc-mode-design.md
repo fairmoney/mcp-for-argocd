@@ -90,12 +90,15 @@ ignored, and the token registry is not consulted.
 
 ### Session binding
 
-`HttpSessionManager` records the `clientId` that opened each session. A request
-that presents `mcp-session-id` must carry the same `clientId`, otherwise it gets
+`HttpSessionManager` records the owner that opened each session. A request
+that presents `mcp-session-id` must resolve to the same owner, otherwise it gets
 the existing "Invalid or expired session ID" 400. Today any authenticated caller
 who knows a session's UUID can use it; this closes that for OIDC and machine
-sessions alike. (OIDC `clientId` is the registered MCP client id, stable per
-client, so no human flow changes.)
+sessions alike. The owner is `apikey:<name>` for a key and `oidc:<session id>`
+for an OIDC bearer: the token record's session id, which identifies the login
+and survives token refresh. It is deliberately not the registered MCP client id,
+because a hosted connector registers one client for many people, nor the opaque
+token, which rotates on refresh. (Review finding, 2026-10-22.)
 
 ### Permissions
 
@@ -109,7 +112,7 @@ read-only role, logs included; an explicit narrower role changes nothing.
 ### Attribution
 
 `ServerInfo` gains `principal?: string`. When set, the tool wrapper logs
-`{ principal, tool }` at info on every call (no arguments, no results). Machine
+`{ principal, tool, outcome }` at info on every call (no arguments, no results). Machine
 sessions set it; OIDC sessions do not, so nothing new is logged about people.
 Session start and every rejection are logged with their reason. A machine
 session's start line also carries the client address (`req.ip`, which honours
