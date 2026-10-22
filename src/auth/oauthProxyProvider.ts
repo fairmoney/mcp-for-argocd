@@ -10,6 +10,7 @@ import type {
   OAuthTokens
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { randomBytes } from 'node:crypto';
+import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { OidcConfig } from './config.js';
 import type { OidcProviderMetadata } from './types.js';
 import type { TokenStore } from './tokenStore.js';
@@ -267,7 +268,9 @@ export class OAuthProxyProvider implements OAuthServerProvider {
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const stored = await this.store.getAccessToken(token);
-    if (!stored) throw new Error('Invalid or expired access token');
+    // An OAuth error type, so requireBearerAuth answers 401 (a plain Error is
+    // mapped to 500, which stops clients from re-authenticating).
+    if (!stored) throw new InvalidTokenError('Invalid or expired access token');
     return {
       token,
       clientId: stored.clientId,

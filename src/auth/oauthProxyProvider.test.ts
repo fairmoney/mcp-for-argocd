@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mock, test } from 'node:test';
 import type { Response as ExpressResponse } from 'express';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { OAuthProxyProvider } from './oauthProxyProvider.js';
 import { InMemoryTokenStore } from './inMemoryTokenStore.js';
 import { makeSessionTokenProvider } from './sessionTokenProvider.js';
@@ -109,7 +110,15 @@ test('full flow: authorize -> callback -> exchange code -> verify token', async 
 test('verifyAccessToken rejects an unknown opaque token', async (t) => {
   const { store, provider } = makeProvider();
   t.after(() => store.dispose());
-  await assert.rejects(() => provider.verifyAccessToken('bogus'), /Invalid/);
+  await assert.rejects(
+    () => provider.verifyAccessToken('bogus'),
+    (error: unknown) => {
+      // Must be the SDK's InvalidTokenError so the bearer middleware answers 401.
+      assert.ok(error instanceof InvalidTokenError);
+      assert.match(error.message, /Invalid/);
+      return true;
+    }
+  );
 });
 
 // A Dex stub that models refresh-token ROTATION: each refresh_token grant only

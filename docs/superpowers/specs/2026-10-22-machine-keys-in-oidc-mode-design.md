@@ -130,6 +130,7 @@ tool implementations.
 | `AGENT_API_KEYS` malformed, empty, duplicate key, bad name, missing token | process refuses to start, naming the problem |
 | `AGENT_API_KEYS` set with `AUTH_MODE=token` | process refuses to start |
 | Unknown `amk_` key | 401, no session, no outbound call |
+| Unknown or expired opaque OIDC token | 401 (found during the local smoke test: the provider threw a plain `Error`, which the SDK maps to 500 and which stops clients from re-authenticating; fixed to `InvalidTokenError`) |
 | Valid key, ArgoCD token revoked | session starts; first tool call returns ArgoCD's 401 as a tool error |
 | Valid key, ArgoCD unreachable | tool calls return the client error, as in token mode |
 | Machine request reuses an OIDC session id (or vice versa) | 400 invalid session |
