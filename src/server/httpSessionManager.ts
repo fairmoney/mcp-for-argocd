@@ -14,6 +14,9 @@ interface SessionEntry {
   transport: ClosableTransport;
   server: ClosableServer;
   lastActivityMs: number;
+  // The principal that opened the session (an OIDC clientId or "apikey:<name>");
+  // undefined in token mode, which has no inbound identity.
+  owner?: string;
 }
 
 // Defaults chosen to bound the heap on a long-running server without cutting off
@@ -71,14 +74,22 @@ export class HttpSessionManager {
     return this.evictOldestIdle();
   }
 
-  add(sessionId: string, transport: ClosableTransport, server: ClosableServer): void {
-    this.sessions.set(sessionId, { transport, server, lastActivityMs: this.now() });
+  add(
+    sessionId: string,
+    transport: ClosableTransport,
+    server: ClosableServer,
+    owner?: string
+  ): void {
+    this.sessions.set(sessionId, { transport, server, lastActivityMs: this.now(), owner });
   }
 
-  // Look up a session and mark it active (resets its idle clock).
-  get(sessionId: string): ClosableTransport | undefined {
+  // Look up a session and mark it active (resets its idle clock). A session is
+  // only handed back to the owner that opened it; any other caller — including
+  // an ownerless one — is told there is no such session, and the idle clock is
+  // left alone so a refused probe cannot keep someone else's session alive.
+  get(sessionId: string, owner?: string): ClosableTransport | undefined {
     const entry = this.sessions.get(sessionId);
-    if (!entry) return undefined;
+    if (!entry || entry.owner !== owner) return undefined;
     entry.lastActivityMs = this.now();
     return entry.transport;
   }
