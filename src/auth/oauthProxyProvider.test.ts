@@ -9,6 +9,7 @@ import { makeSessionTokenProvider } from './sessionTokenProvider.js';
 import type { OidcConfig } from './config.js';
 
 const CONFIG: OidcConfig = {
+  mode: 'explicit',
   publicUrl: 'https://mcp.example.com',
   argocdBaseUrl: 'https://argocd.example.com',
   clientId: 'argocd-mcp',
