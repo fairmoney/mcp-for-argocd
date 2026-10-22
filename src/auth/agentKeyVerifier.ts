@@ -59,7 +59,8 @@ export const createCompositeVerifier = (
       if (!matched) throw new InvalidTokenError('Unknown API key');
 
       const principal = `apikey:${matched.name}`;
-      const extra: MachineAuth = { kind: 'apikey', principal, argocdToken: matched.argocdToken };
+      const machine: MachineAuth = { kind: 'apikey', principal, argocdToken: matched.argocdToken };
+      const extra: Record<string, unknown> = { ...machine };
       return {
         token,
         clientId: principal,

@@ -25,9 +25,10 @@ export const isAgentKeyShaped = (token: string): boolean => AGENT_KEY_PATTERN.te
 // deployment uses to fill keySha256 from the plaintext key.
 export const hashAgentKey = (key: string): Buffer => createHash('sha256').update(key).digest();
 
-const fail = (message: string): never => {
+// A function declaration (not an arrow) so TypeScript narrows after each call.
+function fail(message: string): never {
   throw new Error(`AGENT_API_KEYS: ${message}`);
-};
+}
 
 // Read AGENT_API_KEYS, a JSON object {"<name>": {"keySha256": "<hex>",
 // "argocdToken": "<token>"}}. Undefined when the variable is unset or blank
