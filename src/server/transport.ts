@@ -8,6 +8,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
 import { resolveAuthMode, loadOidcConfig } from '../auth/config.js';
+import { loadAgentApiKeys } from '../auth/agentKeys.js';
+import { createCompositeVerifier } from '../auth/agentKeyVerifier.js';
+import { resolveSessionCredentials } from './sessionCredentials.js';
 import { discoverOidc, SSONotConfiguredError } from '../auth/oidcDiscovery.js';
 import type { OidcProviderMetadata } from '../auth/types.js';
 import { createTokenStore } from '../auth/tokenStoreFactory.js';
@@ -166,6 +169,12 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
       { clientMode: config.mode, clientId: config.clientId },
       'OIDC client mode resolved'
     );
+    // Named machine keys (AGENT_API_KEYS) sit beside the OIDC login; absent
+    // means no machine path. Malformed config throws here and stops startup.
+    const agentKeys = loadAgentApiKeys();
+    if (agentKeys) {
+      logger.info({ principals: agentKeys.map((k) => `apikey:${k.name}`) }, 'Machine keys loaded');
+    }
     const store = createTokenStore(config);
 
     // Resolve OIDC discovery ONCE at startup and fail closed. Starting the
@@ -227,15 +236,27 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
       }
     });
 
-    const bearerAuth = requireBearerAuth({ verifier: provider });
+    // Bearer tokens are routed by shape: machine keys to the key hashes, all
+    // else to the OIDC provider. Nothing below runs without a verified token.
+    const bearerAuth = requireBearerAuth({
+      verifier: createCompositeVerifier(provider, agentKeys)
+    });
 
     app.post('/mcp', bearerAuth, async (req, res) => {
       try {
         const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
         let transport: StreamableHTTPServerTransport;
 
+        // req.auth is set by requireBearerAuth. The credentials decide which
+        // ArgoCD token the session calls with and who may reuse its id.
+        const creds = resolveSessionCredentials(req.auth!, (opaque) =>
+          makeSessionTokenProvider(store, meta, config, opaque)
+        );
+
         const existing =
-          !stateless && sessionIdFromHeader ? sessions.get(sessionIdFromHeader) : undefined;
+          !stateless && sessionIdFromHeader
+            ? sessions.get(sessionIdFromHeader, creds.owner)
+            : undefined;
         if (existing) {
           transport = existing as StreamableHTTPServerTransport;
         } else if (stateless || (!sessionIdFromHeader && isInitializeRequest(req.body))) {
@@ -247,16 +268,21 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
             });
             return;
           }
-          const opaque = req.auth!.token; // set by requireBearerAuth
-          const tokenSource = makeSessionTokenProvider(store, meta, config, opaque);
-
           transport = new StreamableHTTPServerTransport(
             stateless
               ? { sessionIdGenerator: undefined }
               : {
                   sessionIdGenerator: () => randomUUID(),
                   onsessioninitialized: (id) => {
-                    sessions.add(id, transport, server);
+                    sessions.add(id, transport, server, creds.owner);
+                    // The client address is the one signal that a key is in
+                    // use from somewhere other than its expected path.
+                    if (creds.principal) {
+                      logger.info(
+                        { principal: creds.principal, sessionId: id, clientAddress: req.ip },
+                        'Machine session started'
+                      );
+                    }
                   }
                 }
           );
@@ -270,7 +296,8 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
             argocdBaseUrl: config.argocdBaseUrl,
             argocdApiToken: '',
             pinBaseUrl: true,
-            tokenSource
+            tokenSource: creds.tokenSource,
+            principal: creds.principal
           });
           // Stateless: nothing tracks this transport/server, so close both when
           // the response ends or the client disconnects — otherwise each request
