@@ -1,7 +1,7 @@
 # Machine API keys alongside OIDC
 
 **Date:** 2026-10-22
-**Status:** Proposed
+**Status:** Approved (2026-10-22, with the key-hash and client-address additions)
 **Branch:** mb/OPS-6124-machine-keys
 **Ticket:** OPS-6124
 
