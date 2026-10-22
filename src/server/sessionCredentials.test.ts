@@ -45,11 +45,11 @@ test('an OIDC bearer is owned by its login, not by the registered client', () =>
   assert.notEqual(resolveSessionOwner(other), resolveSessionOwner(oidcAuth));
 });
 
-test('a token record without a session id falls back to the client id', () => {
+test('a token record without a session id fails closed rather than binding to the client', () => {
   const legacy: AuthInfo = { ...oidcAuth, extra: { argocdToken: 'upstream' } };
-  assert.equal(resolveSessionOwner(legacy), 'client:client-1');
+  assert.throws(() => resolveSessionOwner(legacy), /session id/);
   const none: AuthInfo = { ...oidcAuth, extra: undefined };
-  assert.equal(resolveSessionOwner(none), 'client:client-1');
+  assert.throws(() => resolveSessionOwner(none), /session id/);
 });
 
 test('a machine AuthInfo yields the static ArgoCD token, its principal and owner', () => {

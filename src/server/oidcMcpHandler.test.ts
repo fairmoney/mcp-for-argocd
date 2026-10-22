@@ -57,8 +57,14 @@ const provider: BearerTokenProvider = { current: async () => 'live', refresh: as
 // onsessioninitialized, exactly when the SDK would.
 const makeHarness = (opts: { stateless?: boolean; maxSessions?: number } = {}) => {
   const sessions = new HttpSessionManager({ disableTimer: true, maxSessions: opts.maxSessions });
-  const transports: { opts: TransportOptions; handled: unknown[]; t: McpTransportLike }[] = [];
+  const transports: {
+    opts: TransportOptions;
+    handled: unknown[];
+    closed: boolean;
+    t: McpTransportLike;
+  }[] = [];
   const servers: SessionServerInfo[] = [];
+  const serversClosed: number[] = [];
   let ids = 0;
   const deps: OidcMcpHandlerDeps = {
     sessions,
@@ -70,11 +76,14 @@ const makeHarness = (opts: { stateless?: boolean; maxSessions?: number } = {}) =
       const entry = {
         opts: topts,
         handled: [] as unknown[],
+        closed: false,
         t: {
           sessionId: undefined as string | undefined,
           start: async () => {},
           send: async () => {},
-          close: async () => {},
+          close: async () => {
+            entry.closed = true;
+          },
           handleRequest: async (_req: Request, _res: Response, body?: unknown) => {
             entry.handled.push(body);
             if (
@@ -91,11 +100,23 @@ const makeHarness = (opts: { stateless?: boolean; maxSessions?: number } = {}) =
       return entry.t;
     },
     createServer: (info) => {
-      servers.push(info);
-      return { connect: async () => {}, close: () => {} };
+      const index = servers.push(info) - 1;
+      return {
+        connect: async () => {},
+        close: () => {
+          serversClosed.push(index);
+        }
+      };
     }
   };
-  return { deps, sessions, transports, servers, handler: createOidcMcpHandler(deps) };
+  return {
+    deps,
+    sessions,
+    transports,
+    servers,
+    serversClosed,
+    handler: createOidcMcpHandler(deps)
+  };
 };
 
 const makeReq = (auth: AuthInfo, body: unknown, sessionId?: string) =>
@@ -254,4 +275,28 @@ test('at capacity, a new session is refused with 503', async () => {
 
   assert.equal(out.status, 503);
   assert.equal(h.servers.length, 1);
+});
+
+test('stateless: closing the response releases the transport and the server', async () => {
+  const h = makeHarness({ stateless: true });
+  const { res, out } = makeRes();
+  await h.handler(makeReq(machineAuth('bot'), CALL), res);
+  assert.equal(h.transports[0].closed, false);
+  assert.deepEqual(h.serversClosed, []);
+
+  out.closeHandlers[0]();
+
+  assert.equal(h.transports[0].closed, true, 'transport closed with the response');
+  assert.deepEqual(h.serversClosed, [0], 'server closed with the response');
+});
+
+test('a stateful session is forgotten when its transport closes', async () => {
+  const h = makeHarness();
+  await h.handler(makeReq(machineAuth('bot'), INIT), makeRes().res);
+  assert.equal(h.sessions.size, 1);
+
+  h.transports[0].t.onclose?.();
+
+  assert.equal(h.sessions.size, 0, 'the slot is freed');
+  assert.equal(h.sessions.get('sid-1', 'apikey:bot'), undefined);
 });

@@ -148,15 +148,25 @@ tool implementations.
 - Unit, verifier: routing by prefix; constant-time compare across all keys
   (a miss touches every key); unknown key throws `InvalidTokenError`; the OIDC
   path still delegates to the provider.
-- Unit, session binding: same `clientId` reuses, different `clientId` is refused.
+- Unit, session binding: the owner that added a session reuses it; any other
+  owner, ownerless lookups included, is refused and does not touch the idle
+  clock. Owner resolution: a key is `apikey:<name>`, an OIDC bearer is
+  `oidc:<session id>`, and a token record without a session id fails closed.
 - Unit, server: machine construction pins the base URL and uses the static token
   (reuses the `oidcTransport.test.ts` pattern); `principal` is logged per call
   and absent otherwise.
-- Transport-level: no harness exists for `connectHttpTransport` (OIDC discovery
-  against a live ArgoCD, `process.exit`). Manual verification on
-  `argocd-mcp-non-prod` with a throwaway key: OIDC login still works; an `amk_`
-  session lists tools and calls `list_applications`; a wrong key gets 401; a
-  session id cannot be reused across the two paths. The gap is on OPS-6124.
+- Handler: the oidc `POST /mcp` handler is a factory (`createOidcMcpHandler`)
+  driven with a fake transport and server: machine initialize (credentials,
+  owner, start log with the client address), reuse by the owner, refusal of
+  another principal, OIDC initialize (provider, no principal, owned by the
+  login, not by the registered client), stateless (nothing kept, start logged
+  per request, transport and server released when the response closes), the
+  session's `onclose` forgetting it, the 400 and 503 paths.
+- Not unit-testable: `connectHttpTransport` itself (OIDC discovery against a
+  live ArgoCD, `process.exit`). Covered by the non-prod validation recorded on
+  OPS-6124: OIDC login still works with keys loaded; an `amk_` session calls
+  `list_applications`; a wrong key gets 401; a session id cannot be reused by
+  another principal; the account's RBAC refuses a sync.
 
 ## Observability
 

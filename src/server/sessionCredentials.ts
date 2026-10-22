@@ -15,15 +15,18 @@ export interface SessionCredentials {
 // principal. An OIDC bearer is bound to the login it came from (the token
 // record's session id, which survives token refresh), not to the registered
 // MCP client: a hosted connector registers one client for many people, and
-// they must not be able to pick up each other's sessions. The client id is
-// only a fallback for a token record without a session id.
+// they must not be able to pick up each other's sessions. Every stored token
+// carries that id; a record without one is a bug in the store, and binding
+// to anything weaker instead would silently merge those people's sessions,
+// so it fails closed (the handler answers 500 and logs it).
 export const resolveSessionOwner = (auth: AuthInfo): string => {
   const machine = machineAuthOf(auth);
   if (machine) return machine.principal;
   const sessionId = auth.extra?.sessionId;
-  return typeof sessionId === 'string' && sessionId
-    ? `oidc:${sessionId}`
-    : `client:${auth.clientId}`;
+  if (typeof sessionId !== 'string' || !sessionId) {
+    throw new Error('OIDC token record carries no session id; refusing to bind the session');
+  }
+  return `oidc:${sessionId}`;
 };
 
 // Turn the AuthInfo the bearer middleware attached into the session's ArgoCD
