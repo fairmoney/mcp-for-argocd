@@ -3,6 +3,7 @@ import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.
 import type { OAuthTokenVerifier } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { type AgentKey, hashAgentKey, isAgentKeyShaped } from './agentKeys.js';
+import { logger } from '../logging/logging.js';
 
 // The SDK's requireBearerAuth refuses any AuthInfo without a numeric expiresAt.
 // A machine key does not expire (it is rotated by configuration), so each
@@ -56,7 +57,11 @@ export const createCompositeVerifier = (
       for (const key of keys) {
         if (equals(presented, key.keySha256)) matched = key;
       }
-      if (!matched) throw new InvalidTokenError('Unknown API key');
+      if (!matched) {
+        // The reason, never the key: a rejected probe is worth a log line.
+        logger.warn({ reason: 'unknown machine key' }, 'Bearer token rejected');
+        throw new InvalidTokenError('Unknown API key');
+      }
 
       const principal = `apikey:${matched.name}`;
       const machine: MachineAuth = { kind: 'apikey', principal, argocdToken: matched.argocdToken };

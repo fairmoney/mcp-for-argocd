@@ -270,7 +270,10 @@ export class OAuthProxyProvider implements OAuthServerProvider {
     const stored = await this.store.getAccessToken(token);
     // An OAuth error type, so requireBearerAuth answers 401 (a plain Error is
     // mapped to 500, which stops clients from re-authenticating).
-    if (!stored) throw new InvalidTokenError('Invalid or expired access token');
+    if (!stored) {
+      logger.info({ reason: 'opaque token not in store' }, 'Bearer token rejected');
+      throw new InvalidTokenError('Invalid or expired access token');
+    }
     return {
       token,
       clientId: stored.clientId,

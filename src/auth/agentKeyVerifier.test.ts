@@ -4,6 +4,7 @@ import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.
 import type { OAuthTokenVerifier } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { hashAgentKey, type AgentKey } from './agentKeys.js';
+import { logger } from '../logging/logging.js';
 import {
   createCompositeVerifier,
   MACHINE_AUTH_TTL_SEC,
@@ -115,4 +116,22 @@ test('every configured key is compared, even after a match (no early exit)', asy
   compares = 0;
   await assert.rejects(verifier.verifyAccessToken(UNKNOWN_KEY));
   assert.equal(compares, KEYS.length);
+});
+
+test('an unknown key is logged with a reason and without the key itself', async () => {
+  const lines: Record<string, unknown>[] = [];
+  const original = logger.warn;
+  logger.warn = ((fields: Record<string, unknown>) => {
+    lines.push(fields);
+  }) as typeof logger.warn;
+  try {
+    await assert.rejects(
+      createCompositeVerifier(makeFallback().verifier, KEYS).verifyAccessToken(UNKNOWN_KEY)
+    );
+  } finally {
+    logger.warn = original;
+  }
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].reason, 'unknown machine key');
+  assert.doesNotMatch(JSON.stringify(lines[0]), /amk_/);
 });
