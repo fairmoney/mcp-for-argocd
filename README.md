@@ -347,7 +347,7 @@ A machine caller (an automation agent, a CI job) cannot complete a browser login
 
 Behaviour:
 
-- Off by default; unset means the OIDC bearer is the only way in. The flag is refused outside `AUTH_MODE=oidc` (token mode is passthrough by nature).
+- Off by default; unset means the OIDC bearer is the only way in. The flag is refused outside `AUTH_MODE=oidc` on the HTTP transport (token mode is passthrough by nature); the stdio and SSE transports have no auth mode and ignore it.
 - A request with `x-argocd-api-token` and no `Authorization` takes the passthrough path; one with only `Authorization` takes the OIDC path exactly as before; one with both is refused (`400`), the server never guesses which identity was meant.
 - When a session starts (and on every request in [stateless mode](#stateless-mode)) the token is checked once against ArgoCD's `GET /api/v1/session/userinfo`: not logged in → `401`, no session created; ArgoCD unavailable → `503`, never a pass. A request that reuses a session needs no round trip: the session is owned by the token's SHA-256, so only the same token can pick it up.
 - The base URL is pinned to `ARGOCD_BASE_URL`: `x-argocd-base-url`, the `argocdBaseUrl` tool argument and the token registry are ignored, so a forwarded token is only ever sent to the configured instance.

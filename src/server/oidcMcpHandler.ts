@@ -42,8 +42,9 @@ const jsonRpcError = (res: Response, status: number, message: string, id: unknow
   res.status(status).json({ jsonrpc: '2.0', error: { code: -32000, message }, id: id ?? null });
 };
 
-// The oidc-mode POST /mcp handler. It runs behind requireBearerAuth, so
-// req.auth is always a verified OIDC login or ArgoCD token. Each HTTP session
+// The oidc-mode POST /mcp handler. It runs behind the auth dispatcher (the
+// SDK's bearer check or the passthrough middleware), so req.auth is always a
+// verified OIDC login or ArgoCD token. Each HTTP session
 // is bound to the owner that opened it and is built with that owner's ArgoCD
 // credentials; a request for someone else's session id is told there is no
 // such session.

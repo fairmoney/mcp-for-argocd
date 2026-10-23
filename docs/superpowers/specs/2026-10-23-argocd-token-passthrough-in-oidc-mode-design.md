@@ -58,17 +58,25 @@ Decided from the headers alone, before any verifier runs:
   every request in stateless mode) the server calls
   `GET /api/v1/session/userinfo` on the pinned ArgoCD with the token. Logged in
   → continue; not logged in, 401 or 403 → 401 and no session; ArgoCD
-  unreachable or 5xx → 503, never a pass. This is what keeps junk tokens from
-  filling the session pool humans share, at one ArgoCD call per session.
+  unreachable, silent past a 10 s deadline, 5xx, or answering something other
+  than JSON → 503, never a pass (and none of those messages carry the body or
+  the token). This is what keeps junk tokens from filling the session pool
+  humans share, at one ArgoCD call per session.
 - **Owner is the token.** The session is bound to the token's SHA-256, so a
   reuse request needs no round trip and only the same token can pick it up.
-- **Principal for logs.** `argocd:<account>` when userinfo's username is a
-  local account name (`[a-z0-9-]+`); otherwise `argocd-token:<8 hex of the
-  fingerprint>`, so an SSO user's email never reaches a log line.
+- **Principal for logs.** `argocd:<account>` when userinfo says the token is
+  a local account's (issuer `argocd`) and the name matches `[a-z0-9-]+`, the
+  pattern being only a guard on what is logged; otherwise `argocd-token:<8 hex
+  of the fingerprint>`, SSO users included, so a person never reaches a log
+  line.
 - **Base URL pinned**; `x-argocd-base-url`, `argocdBaseUrl` and the token
   registry are ignored.
-- The AuthInfo attached by the middleware lets `requireBearerAuth` be skipped
-  for that request; the handler sees one shape of identity for both paths.
+- One dispatcher classifies each request once from its headers and routes it
+  to the SDK's bearer check (OIDC) or to the passthrough middleware (token
+  header present, including the ambiguous case). The middleware attaches an
+  AuthInfo of the same shape the OIDC path gets, so the handler sees one kind
+  of identity; it keeps its own classification as a defence-in-depth guard.
+  Nothing on the passthrough route passes through `requireBearerAuth`.
 
 ### Unchanged from the key design
 
@@ -105,9 +113,13 @@ the extracted and tested `createOidcMcpHandler`.
 - Handler (`oidcMcpHandler.test.ts`): passthrough and OIDC initialize, reuse
   by the owner, refusal of another principal, stateless, lifecycle hooks, 400
   and 503.
-- Not unit-testable: `connectHttpTransport` itself. Covered by the local
-  end-to-end run against a fake ArgoCD with a userinfo endpoint, then the
-  non-prod validation recorded on OPS-6124.
+- Wiring (`transport.test.ts`): token mode with the flag set refuses to start
+  (the one guarantee that lives in the wiring, not in a unit); the dispatcher
+  is unit-tested for all four header combinations and for flag-off.
+- Not unit-testable: the rest of `connectHttpTransport` (OIDC discovery against
+  a live ArgoCD, `process.exit`). Covered by the local end-to-end run against a
+  fake ArgoCD with a userinfo endpoint, then the non-prod validation recorded
+  on OPS-6124.
 
 ## Observability
 

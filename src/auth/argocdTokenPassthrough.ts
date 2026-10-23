@@ -110,13 +110,14 @@ export class PassthroughRejected extends Error {
 export const verifyArgocdToken = async (
   argocdBaseUrl: string,
   token: string,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs: number = USERINFO_TIMEOUT_MS
 ): Promise<{ username?: string; iss?: string }> => {
   let response: globalThis.Response;
   try {
     response = await fetchImpl(`${argocdBaseUrl.replace(/\/+$/, '')}/api/v1/session/userinfo`, {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      signal: AbortSignal.timeout(USERINFO_TIMEOUT_MS)
+      signal: AbortSignal.timeout(timeoutMs)
     });
   } catch (error) {
     throw new PassthroughRejected(
@@ -148,13 +149,17 @@ export interface PassthroughMiddlewareDeps {
   verify?: typeof verifyArgocdToken;
 }
 
-// Express middleware in front of the OIDC bearer check. On the passthrough
-// path it attaches an AuthInfo (so the bearer check is skipped and the handler
-// sees one shape of identity for both paths); on the OIDC path it does
-// nothing. The token is verified with ArgoCD when a session starts (no
-// mcp-session-id) and on every request in stateless mode; a request that
-// reuses a session only needs the owner, which the fingerprint gives without
-// a round trip, and the session's own owner check does the rest.
+// The passthrough side of the auth dispatcher below: it only ever sees
+// requests the dispatcher routed to it (a token header present, with or
+// without an Authorization header). It attaches an AuthInfo of the same shape
+// the OIDC path gets, so the handler sees one kind of identity. Its own
+// classification is deliberately kept as a defence-in-depth guard: should it
+// ever be mounted without the dispatcher, an OIDC-routed request still passes
+// through untouched and the ambiguous case is still refused. The token is
+// verified with ArgoCD when a session starts (no mcp-session-id) and on every
+// request in stateless mode; a request that reuses a session only needs the
+// owner, which the fingerprint gives without a round trip, and the session's
+// own owner check does the rest.
 export const createPassthroughMiddleware = (deps: PassthroughMiddlewareDeps) => {
   const verify = deps.verify ?? verifyArgocdToken;
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -198,6 +203,9 @@ export const createPassthroughMiddleware = (deps: PassthroughMiddlewareDeps) => 
       fingerprint,
       principal
     } satisfies PassthroughAuth;
+    // This AuthInfo never passes through requireBearerAuth (the dispatcher
+    // routes around it), so none of the SDK's checks, expiresAt included,
+    // apply here; the token's lifetime is ArgoCD's, enforced on every call.
     req.auth = {
       token,
       clientId: principal,

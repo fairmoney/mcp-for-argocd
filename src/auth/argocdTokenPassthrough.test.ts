@@ -60,6 +60,10 @@ test('principalFor names a local account by issuer and fingerprints anything els
   assert.equal(principalFor('jdoe', 'https://argocd/api/dex', fp), 'argocd-token:aaaaaaaa');
   assert.equal(principalFor('someone@example.com', 'argocd', fp), 'argocd-token:aaaaaaaa');
   assert.equal(principalFor('devops-agent', undefined, fp), 'argocd-token:aaaaaaaa');
+  // The name pattern is a last guard on what is logged, issuer or not.
+  for (const odd of ['devops_agent', 'devops.agent', 'DevOps', '']) {
+    assert.equal(principalFor(odd, 'argocd', fp), 'argocd-token:aaaaaaaa', odd);
+  }
   assert.equal(principalFor(undefined, 'argocd', fp), 'argocd-token:aaaaaaaa');
 });
 
@@ -129,6 +133,14 @@ test('verifyArgocdToken: not logged in, 401 and 403 are a 401; other failures ar
   await rejectsWith(fetchAnswering(401), 401);
   await rejectsWith(fetchAnswering(403), 401);
   await rejectsWith(fetchAnswering(500), 503);
+  // What AbortSignal.timeout produces when ArgoCD accepts the connection and
+  // never answers: the deadline is a 503, not a hang and not a pass.
+  await rejectsWith(
+    (async () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    }) as typeof fetch,
+    503
+  );
   await rejectsWith(
     (async () => {
       throw new Error('connect ECONNREFUSED');
@@ -312,4 +324,21 @@ test('dispatcher: with the flag off everything is the bearer check, token header
   });
   dispatch(makeReq({ 'x-argocd-api-token': 'tok' }), makeRes().res, (() => {}) as NextFunction);
   assert.deepEqual(seen, ['bearer']);
+});
+
+test('verifyArgocdToken: a silent ArgoCD is cut off by the deadline, not waited for', async () => {
+  // This fetch answers only when the signal it was given aborts, so the test
+  // passes only if the deadline really fires.
+  const silentUntilAborted = ((_url: unknown, init?: RequestInit) =>
+    new Promise<never>((_, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+    })) as typeof fetch;
+  const outcome = await Promise.race([
+    verifyArgocdToken('https://argocd', 'tok', silentUntilAborted, 20).then(
+      () => 'resolved',
+      (e: unknown) => (e instanceof PassthroughRejected ? `rejected ${e.status}` : 'other error')
+    ),
+    new Promise<string>((resolve) => setTimeout(() => resolve('no deadline fired'), 1000))
+  ]);
+  assert.equal(outcome, 'rejected 503');
 });
