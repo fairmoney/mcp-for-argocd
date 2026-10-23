@@ -8,8 +8,10 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
 import { resolveAuthMode, loadOidcConfig } from '../auth/config.js';
-import { loadAgentApiKeys } from '../auth/agentKeys.js';
-import { createCompositeVerifier } from '../auth/agentKeyVerifier.js';
+import {
+  createPassthroughMiddleware,
+  resolveAllowArgocdToken
+} from '../auth/argocdTokenPassthrough.js';
 import { createOidcMcpHandler } from './oidcMcpHandler.js';
 import { discoverOidc, SSONotConfiguredError } from '../auth/oidcDiscovery.js';
 import type { OidcProviderMetadata } from '../auth/types.js';
@@ -169,11 +171,12 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
       { clientMode: config.mode, clientId: config.clientId },
       'OIDC client mode resolved'
     );
-    // Named machine keys (AGENT_API_KEYS) sit beside the OIDC login; absent
-    // means no machine path. Malformed config throws here and stops startup.
-    const agentKeys = loadAgentApiKeys();
-    if (agentKeys) {
-      logger.info({ principals: agentKeys.map((k) => `apikey:${k.name}`) }, 'Machine keys loaded');
+    // ArgoCD token passthrough (MCP_ALLOW_ARGOCD_TOKEN) sits beside the OIDC
+    // login; off means the OIDC bearer is the only way in. A bad flag value
+    // throws here and stops startup.
+    const allowArgocdToken = resolveAllowArgocdToken();
+    if (allowArgocdToken) {
+      logger.info('ArgoCD token passthrough enabled (x-argocd-api-token)');
     }
     const store = createTokenStore(config);
 
@@ -236,15 +239,24 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
       }
     });
 
-    // Bearer tokens are routed by shape: machine keys to the key hashes, all
-    // else to the OIDC provider. Nothing below runs without a verified token.
-    const bearerAuth = requireBearerAuth({
-      verifier: createCompositeVerifier(provider, agentKeys)
+    // A forwarded ArgoCD token attaches its own AuthInfo and skips the OIDC
+    // bearer check; everything else must carry a bearer the provider issued.
+    const passthrough = createPassthroughMiddleware({
+      allowArgocdToken,
+      argocdBaseUrl: config.argocdBaseUrl,
+      stateless
     });
+    const bearerAuth = requireBearerAuth({ verifier: provider });
+    const bearerAuthUnlessPassthrough = (
+      req: express.Request,
+      res: express.Response,
+      next: express.NextFunction
+    ) => (req.auth ? next() : bearerAuth(req, res, next));
 
     app.post(
       '/mcp',
-      bearerAuth,
+      passthrough,
+      bearerAuthUnlessPassthrough,
       createOidcMcpHandler({
         sessions,
         stateless,

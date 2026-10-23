@@ -81,13 +81,13 @@ export const createOidcMcpHandler = (deps: OidcMcpHandlerDeps) => {
       }
 
       const creds = resolveSessionCredentials(auth, deps.oidcProviderFor);
-      // The client address is the one signal that a key is in use from
+      // The client address is the one signal that a token is in use from
       // somewhere other than its expected path.
-      const logMachineStart = (fields: Record<string, unknown>) => {
+      const logSessionStart = (fields: Record<string, unknown>) => {
         if (creds.principal) {
           logger.info(
             { principal: creds.principal, clientAddress: req.ip, ...fields },
-            'Machine session started'
+            'Token session started'
           );
         }
       };
@@ -103,13 +103,13 @@ export const createOidcMcpHandler = (deps: OidcMcpHandlerDeps) => {
       let transport: McpTransportLike;
       if (stateless) {
         transport = deps.createTransport({ sessionIdGenerator: undefined });
-        logMachineStart({ stateless: true });
+        logSessionStart({ stateless: true });
       } else {
         transport = deps.createTransport({
           sessionIdGenerator: newSessionId,
           onsessioninitialized: (id) => {
             sessions.add(id, transport, server, creds.owner);
-            logMachineStart({ sessionId: id });
+            logSessionStart({ sessionId: id });
           }
         });
         transport.onclose = () => {

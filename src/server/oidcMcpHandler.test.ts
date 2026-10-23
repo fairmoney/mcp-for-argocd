@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import type { Request, Response } from 'express';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
@@ -35,12 +36,19 @@ const CALL = {
   params: { name: 'list_applications', arguments: {} }
 };
 
-const machineAuth = (name: string): AuthInfo => ({
-  token: `amk_${name}`,
-  clientId: `apikey:${name}`,
+// A forwarded ArgoCD token, as the passthrough middleware attaches it.
+const fp = (name: string) => createHash('sha256').update(`argocd-token-${name}`).digest('hex');
+const tokenAuth = (name: string): AuthInfo => ({
+  token: `argocd-token-${name}`,
+  clientId: `argocd:${name}`,
   scopes: [],
   expiresAt: 9e9,
-  extra: { kind: 'apikey', principal: `apikey:${name}`, argocdToken: `argocd-token-${name}` }
+  extra: {
+    kind: 'argocd-token',
+    argocdToken: `argocd-token-${name}`,
+    fingerprint: fp(name),
+    principal: `argocd:${name}`
+  }
 });
 const oidcAuth = (sessionId: string): AuthInfo => ({
   token: `opaque-${sessionId}`,
@@ -164,11 +172,11 @@ const captureInfo = async (fn: () => Promise<void>) => {
   return lines;
 };
 
-test('machine initialize: server built with the key token and principal, session owned by the key', async () => {
+test('passthrough initialize: server built with the forwarded token and principal, session owned by the token', async () => {
   const h = makeHarness();
   const { res, out } = makeRes();
 
-  const lines = await captureInfo(() => h.handler(makeReq(machineAuth('bot'), INIT), res));
+  const lines = await captureInfo(() => h.handler(makeReq(tokenAuth('bot'), INIT), res));
 
   assert.equal(out.status, 200);
   assert.equal(h.servers.length, 1);
@@ -177,21 +185,25 @@ test('machine initialize: server built with the key token and principal, session
     argocdApiToken: '',
     pinBaseUrl: true,
     tokenSource: 'argocd-token-bot',
-    principal: 'apikey:bot'
+    principal: 'argocd:bot'
   });
-  assert.equal(h.sessions.get('sid-1', 'apikey:bot'), h.transports[0].t, 'stored under the key');
-  const start = lines.find((l) => l.principal === 'apikey:bot');
-  assert.ok(start, 'machine session start is logged');
+  assert.equal(
+    h.sessions.get('sid-1', `argocd-token:${fp('bot')}`),
+    h.transports[0].t,
+    'stored under the token fingerprint'
+  );
+  const start = lines.find((l) => l.principal === 'argocd:bot');
+  assert.ok(start, 'passthrough session start is logged');
   assert.equal(start.sessionId, 'sid-1');
   assert.equal(start.clientAddress, '10.0.0.9');
 });
 
 test('the owner that opened a session reuses it without a new server', async () => {
   const h = makeHarness();
-  await h.handler(makeReq(machineAuth('bot'), INIT), makeRes().res);
+  await h.handler(makeReq(tokenAuth('bot'), INIT), makeRes().res);
   const { res, out } = makeRes();
 
-  await h.handler(makeReq(machineAuth('bot'), CALL, 'sid-1'), res);
+  await h.handler(makeReq(tokenAuth('bot'), CALL, 'sid-1'), res);
 
   assert.equal(out.status, 200);
   assert.equal(h.servers.length, 1, 'no second server');
@@ -200,9 +212,9 @@ test('the owner that opened a session reuses it without a new server', async () 
 
 test('another principal presenting the session id is told there is no such session', async () => {
   const h = makeHarness();
-  await h.handler(makeReq(machineAuth('bot'), INIT), makeRes().res);
+  await h.handler(makeReq(tokenAuth('bot'), INIT), makeRes().res);
 
-  for (const intruder of [machineAuth('other'), oidcAuth('login-1')]) {
+  for (const intruder of [tokenAuth('other'), oidcAuth('login-1')]) {
     const { res, out } = makeRes();
     await h.handler(makeReq(intruder, CALL, 'sid-1'), res);
     assert.equal(out.status, 400);
@@ -236,21 +248,21 @@ test('OIDC initialize: server built with the refreshable provider, no principal,
   );
 });
 
-test('stateless: no session is kept, every request builds its own server, machine start is logged', async () => {
+test('stateless: no session is kept, every request builds its own server, start is logged', async () => {
   const h = makeHarness({ stateless: true });
   const { res, out } = makeRes();
 
-  const lines = await captureInfo(() => h.handler(makeReq(machineAuth('bot'), CALL), res));
+  const lines = await captureInfo(() => h.handler(makeReq(tokenAuth('bot'), CALL), res));
 
   assert.equal(h.transports[0].opts.sessionIdGenerator, undefined);
   assert.equal(h.sessions.size, 0);
-  assert.equal(h.servers[0].principal, 'apikey:bot');
+  assert.equal(h.servers[0].principal, 'argocd:bot');
   assert.equal(
     out.closeHandlers.length,
     1,
     'transport and server are released when the response closes'
   );
-  const start = lines.find((l) => l.principal === 'apikey:bot');
+  const start = lines.find((l) => l.principal === 'argocd:bot');
   assert.ok(start);
   assert.equal(start.stateless, true);
   assert.equal(start.clientAddress, '10.0.0.9');
@@ -260,7 +272,7 @@ test('a non-initialize request without a session id is a 400', async () => {
   const h = makeHarness();
   const { res, out } = makeRes();
 
-  await h.handler(makeReq(machineAuth('bot'), CALL), res);
+  await h.handler(makeReq(tokenAuth('bot'), CALL), res);
 
   assert.equal(out.status, 400);
   assert.equal(h.servers.length, 0);
@@ -268,10 +280,10 @@ test('a non-initialize request without a session id is a 400', async () => {
 
 test('at capacity, a new session is refused with 503', async () => {
   const h = makeHarness({ maxSessions: 1 });
-  await h.handler(makeReq(machineAuth('bot'), INIT), makeRes().res);
+  await h.handler(makeReq(tokenAuth('bot'), INIT), makeRes().res);
   const { res, out } = makeRes();
 
-  await h.handler(makeReq(machineAuth('other'), INIT), res);
+  await h.handler(makeReq(tokenAuth('other'), INIT), res);
 
   assert.equal(out.status, 503);
   assert.equal(h.servers.length, 1);
@@ -280,7 +292,7 @@ test('at capacity, a new session is refused with 503', async () => {
 test('stateless: closing the response releases the transport and the server', async () => {
   const h = makeHarness({ stateless: true });
   const { res, out } = makeRes();
-  await h.handler(makeReq(machineAuth('bot'), CALL), res);
+  await h.handler(makeReq(tokenAuth('bot'), CALL), res);
   assert.equal(h.transports[0].closed, false);
   assert.deepEqual(h.serversClosed, []);
 
@@ -292,11 +304,11 @@ test('stateless: closing the response releases the transport and the server', as
 
 test('a stateful session is forgotten when its transport closes', async () => {
   const h = makeHarness();
-  await h.handler(makeReq(machineAuth('bot'), INIT), makeRes().res);
+  await h.handler(makeReq(tokenAuth('bot'), INIT), makeRes().res);
   assert.equal(h.sessions.size, 1);
 
   h.transports[0].t.onclose?.();
 
   assert.equal(h.sessions.size, 0, 'the slot is freed');
-  assert.equal(h.sessions.get('sid-1', 'apikey:bot'), undefined);
+  assert.equal(h.sessions.get('sid-1', `argocd-token:${fp('bot')}`), undefined);
 });

@@ -5,22 +5,28 @@ import type { BearerTokenProvider } from '../argocd/http.js';
 import { resolveSessionCredentials, resolveSessionOwner } from './sessionCredentials.js';
 
 // The oidc /mcp handler binds each HTTP session to an owner and, when it
-// creates one, builds its ArgoCD credentials from the AuthInfo the bearer
-// middleware attached. A machine session uses the static ArgoCD token bound
-// to its key and is owned by "apikey:<name>"; an OIDC session gets the
-// refreshable provider for its opaque token and is owned by its login.
+// creates one, builds its ArgoCD credentials from the AuthInfo the middleware
+// attached. A passthrough session uses the forwarded ArgoCD token and is owned
+// by that token's fingerprint; an OIDC session gets the refreshable provider
+// for its opaque token and is owned by its login.
 
 const oidcProvider: BearerTokenProvider = {
   current: async () => 'live',
   refresh: async () => 'refreshed'
 };
 
-const machineAuth: AuthInfo = {
-  token: 'amk_key',
-  clientId: 'apikey:devops-agent',
+const FP = 'f'.repeat(64);
+const passthroughAuth: AuthInfo = {
+  token: 'argocd-token',
+  clientId: 'argocd:devops-agent',
   scopes: [],
   expiresAt: 1,
-  extra: { kind: 'apikey', principal: 'apikey:devops-agent', argocdToken: 'argocd-token' }
+  extra: {
+    kind: 'argocd-token',
+    argocdToken: 'argocd-token',
+    fingerprint: FP,
+    principal: 'argocd:devops-agent'
+  }
 };
 const oidcAuth: AuthInfo = {
   token: 'opaque-token',
@@ -30,8 +36,8 @@ const oidcAuth: AuthInfo = {
   extra: { argocdToken: 'upstream', argocdBaseUrl: 'https://argocd', sessionId: 'login-42' }
 };
 
-test('a machine key is its own owner', () => {
-  assert.equal(resolveSessionOwner(machineAuth), 'apikey:devops-agent');
+test('a forwarded ArgoCD token is owned by its own fingerprint', () => {
+  assert.equal(resolveSessionOwner(passthroughAuth), `argocd-token:${FP}`);
 });
 
 test('an OIDC bearer is owned by its login, not by the registered client', () => {
@@ -52,20 +58,24 @@ test('a token record without a session id fails closed rather than binding to th
   assert.throws(() => resolveSessionOwner(none), /session id/);
 });
 
-test('a machine AuthInfo yields the static ArgoCD token, its principal and owner', () => {
+test('a passthrough AuthInfo yields the forwarded token, its principal and owner', () => {
   let providerBuiltFor: string | undefined;
 
-  const creds = resolveSessionCredentials(machineAuth, (opaque) => {
+  const creds = resolveSessionCredentials(passthroughAuth, (opaque) => {
     providerBuiltFor = opaque;
     return oidcProvider;
   });
 
   assert.deepEqual(creds, {
-    owner: 'apikey:devops-agent',
-    principal: 'apikey:devops-agent',
+    owner: `argocd-token:${FP}`,
+    principal: 'argocd:devops-agent',
     tokenSource: 'argocd-token'
   });
-  assert.equal(providerBuiltFor, undefined, 'no OIDC session provider is built for a key');
+  assert.equal(
+    providerBuiltFor,
+    undefined,
+    'no OIDC session provider is built for a forwarded token'
+  );
 });
 
 test('an OIDC AuthInfo yields the refreshable provider for its opaque token and no principal', () => {
