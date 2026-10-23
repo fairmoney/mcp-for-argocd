@@ -1,205 +1,130 @@
-# Machine API keys alongside OIDC
+# ArgoCD token passthrough alongside OIDC
 
-**Date:** 2026-10-22
-**Status:** Approved (2026-10-22, with the key-hash and client-address additions)
+**Date:** 2026-10-23 (supersedes the 2026-10-22 machine-API-key design)
+**Status:** Approved (team decision 2026-10-23: passthrough; validation at session start and the `x-argocd-api-token` header on Mihaela's call)
 **Branch:** mb/OPS-6124-machine-keys
 **Ticket:** OPS-6124
 
 ## Problem
 
-The AWS DevOps Agent has to use the production instance (`AUTH_MODE=oidc`).
-It cannot do a browser login; it can only present a fixed bearer token or API
-key. In oidc mode every `/mcp` request goes through `requireBearerAuth`, whose
-only verifier is `OAuthProxyProvider.verifyAccessToken`, and that accepts only
-opaque tokens this server minted after a Dex authorization-code login. So a
-machine has no way in.
+The DevOps Agent (an AWS-hosted agent) has to use the production instance
+(`AUTH_MODE=oidc`). It cannot do a browser login; it can only present a fixed
+bearer token or API key. In oidc mode every `/mcp` request goes through
+`requireBearerAuth`, whose only verifier accepts opaque tokens this server
+minted after a Dex login, so a machine has no way in.
 
-Upstream offers no alternative. Its inbound credential, `MCP_AUTH_TOKEN`, is
-one shared secret for the whole listener ("not a per-caller identity … for
-different reach per caller, run separate instances", SECURITY.md). The team's
-requirements are several callers, each with its own credential and its own
-ArgoCD permissions, on one instance.
+The first design gave machines server-issued API keys mapped to server-held
+ArgoCD tokens (`AGENT_API_KEYS`). The team chose passthrough instead: the
+caller presents its own ArgoCD token, as upstream's token mode already does,
+and the server adds no identity of its own.
 
 ## Decision
 
-In oidc mode, also accept named machine API keys, configured on the pod, each
-bound to its own ArgoCD API token. This is the model of opensearch-edge-logs-mcp
-(`AGENT_API_KEYS`) and of Cerberus (OAuth for people, `cerberus_sk_` keys for
-machines). Permissions per key are ArgoCD's: the key's ArgoCD account and its
-RBAC decide what the caller may do. The MCP registers the same tool set for
-every session, as today.
+In oidc mode, when `MCP_ALLOW_ARGOCD_TOKEN=true`, accept a caller's ArgoCD API
+token in `x-argocd-api-token` and call ArgoCD with it. Permissions are the
+token's ArgoCD RBAC; each machine caller gets its own local ArgoCD account.
+
+### What is accepted with this choice
+
+- The server authenticates no machine caller itself: anyone who can reach the
+  endpoint with any valid ArgoCD token can use it, within that token's RBAC.
+- The production ArgoCD token lives where the caller is configured (for the
+  DevOps Agent: its service registration and `service`'s terraform state).
+- Attribution is ArgoCD's account, not a server-issued identity.
+
+None of this is privilege escalation; it is the access the token already has
+against the ArgoCD API.
 
 ### Configuration
 
-`AGENT_API_KEYS`: a JSON object of named entries.
+- `MCP_ALLOW_ARGOCD_TOKEN`: `true` enables passthrough (trimmed, case-insensitive,
+  only `true`). Default off: nothing changes on any instance. Refused outside
+  `AUTH_MODE=oidc`, where token mode is passthrough by nature.
 
-```json
-{
-  "devops-agent": { "keySha256": "<64 lowercase hex>", "argocdToken": "<ArgoCD API token>" }
-}
-```
+### Routing (oidc `/mcp`)
 
-- A name is `[a-z0-9-]+`. It is the principal, logged as `apikey:<name>`.
-- A key is `amk_` plus 64 lowercase hex characters, generated with
-  `printf 'amk_%s\n' "$(openssl rand -hex 32)"`. The caller holds the key; the
-  pod holds only `keySha256`, the SHA-256 of the whole key string (prefix
-  included), as 64 lowercase hex characters. Terraform computes it with
-  `sha256()` from the same etfvars entry the caller's registration reads, so a
-  pod compromise yields no inbound key. (The ArgoCD tokens are unavoidably
-  plaintext.)
-- `argocdToken` is the ArgoCD API token of a local ArgoCD account created for
-  that caller (`argocd account generate-token --account <name>`).
-- Startup refuses invalid JSON, an empty object, a bad name, a bad hash format,
-  the same hash under two names, or a missing `argocdToken`. It also refuses the
-  variable when `AUTH_MODE` is not `oidc`: token mode has no inbound
-  authentication in this fork, so the keys would mean nothing there. All of this
-  follows the fail-closed convention of `resolveAuthMode` and
-  `ARGOCD_TOKEN_REGISTRY_PATH`.
-- Unset means no machine path. Every other instance keeps today's behaviour.
+Decided from the headers alone, before any verifier runs:
 
-### Request routing (oidc `/mcp`)
+| Flag | `x-argocd-api-token` (non-blank) | `Authorization` | Path |
+|---|---|---|---|
+| off | any | any | OIDC bearer, unchanged |
+| on | absent | any | OIDC bearer, unchanged |
+| on | present | absent | passthrough |
+| on | present | present | 400, the server never guesses which identity was meant |
 
-`requireBearerAuth` keeps gating `/mcp`; its verifier becomes a composite that
-routes on the credential's shape, never on a header name:
+### Passthrough path
 
-| `Authorization: Bearer …` value | Verifier |
-|---|---|
-| starts with `amk_` | machine keys: hash the presented key and compare it against every configured `keySha256` with `timingSafeEqual`, with no early exit; a miss throws `InvalidTokenError` (SDK → 401); a hit yields `AuthInfo { clientId: "apikey:<name>", extra: { kind: "apikey", principal, argocdToken } }` |
-| anything else | `OAuthProxyProvider.verifyAccessToken`, unchanged |
+- **Verified at session start.** On a request with no `mcp-session-id` (and on
+  every request in stateless mode) the server calls
+  `GET /api/v1/session/userinfo` on the pinned ArgoCD with the token. Logged in
+  → continue; not logged in, 401 or 403 → 401 and no session; ArgoCD
+  unreachable or 5xx → 503, never a pass. This is what keeps junk tokens from
+  filling the session pool humans share, at one ArgoCD call per session.
+- **Owner is the token.** The session is bound to the token's SHA-256, so a
+  reuse request needs no round trip and only the same token can pick it up.
+- **Principal for logs.** `argocd:<account>` when userinfo's username is a
+  local account name (`[a-z0-9-]+`); otherwise `argocd-token:<8 hex of the
+  fingerprint>`, so an SSO user's email never reaches a log line.
+- **Base URL pinned**; `x-argocd-base-url`, `argocdBaseUrl` and the token
+  registry are ignored.
+- The AuthInfo attached by the middleware lets `requireBearerAuth` be skipped
+  for that request; the handler sees one shape of identity for both paths.
 
-Only `Authorization: Bearer` is read. The DevOps Agent registers the key with
-`authorization_config.bearer_token`, which emits exactly that header. (edge-logs
-also accepts `X-API-Key`; not here, so there is one inbound path to reason about.)
+### Unchanged from the key design
 
-A rejected key costs one pass over the configured keys and no outbound call,
-and it creates no session, so bad keys cannot fill `MAX_SESSIONS`.
-
-### Session construction
-
-On initialize (and on every request in stateless mode) the handler reads
-`req.auth.extra.kind`:
-
-- `apikey`: `createServer({ argocdBaseUrl: config.argocdBaseUrl, argocdApiToken: '', pinBaseUrl: true, tokenSource: argocdToken, principal })`.
-  The ArgoCD token is a plain string source: no refresh, a 401 from ArgoCD
-  surfaces as the tool error, as it does in token mode.
-- otherwise: `makeSessionTokenProvider(...)`, unchanged.
-
-`pinBaseUrl: true` means the key's ArgoCD token is only ever sent to the
-configured ArgoCD; `x-argocd-base-url` and the `argocdBaseUrl` tool argument are
-ignored, and the token registry is not consulted.
-
-### Session binding
-
-`HttpSessionManager` records the owner that opened each session. A request
-that presents `mcp-session-id` must resolve to the same owner, otherwise it gets
-the existing "Invalid or expired session ID" 400. Today any authenticated caller
-who knows a session's UUID can use it; this closes that for OIDC and machine
-sessions alike. The owner is `apikey:<name>` for a key and `oidc:<session id>`
-for an OIDC bearer: the token record's session id, which identifies the login
-and survives token refresh. It is deliberately not the registered MCP client id,
-because a hosted connector registers one client for many people, nor the opaque
-token, which rotates on refresh. (Review finding, 2026-10-22.)
-
-### Permissions
-
-ArgoCD RBAC only, per the team's decision. The tool set stays process-wide
-(`MCP_READ_ONLY`, `MCP_ENABLE_RESOURCE_MUTATIONS`). A machine session on an
-instance that is not read-only sees the mutating tools; a call its account may
-not make returns ArgoCD's 403 as a tool error. Note that `policy.default:
-role:readonly` in our ArgoCD grants every account at least the built-in
-read-only role, logs included; an explicit narrower role changes nothing.
-
-### Attribution
-
-`ServerInfo` gains `principal?: string`. When set, the tool wrapper logs
-`{ principal, tool, outcome }` at info on every call (no arguments, no results). Machine
-sessions set it; OIDC sessions do not, so nothing new is logged about people.
-Session start and every rejection are logged with their reason. A machine
-session's start line also carries the client address (`req.ip`, which honours
-`X-Forwarded-For` through `TRUST_PROXY_HOPS`): it is the one signal that a key
-is being used from somewhere other than its expected path. Keys and ArgoCD
-tokens are never logged.
-
-### Unchanged
-
-The OIDC flow, token store, OAuth endpoints and callback; token mode; SSE; the
-tool implementations.
+Session ownership (`oidc:<session id>` for OIDC logins, fail closed without
+one), per-call `{principal, tool, outcome}` logging, the session-start line
+with the client address, rejection logging, the 401 for unknown opaque tokens,
+the extracted and tested `createOidcMcpHandler`.
 
 ## Negative paths
 
 | Case | Expected |
 |---|---|
-| `AGENT_API_KEYS` unset | no machine path; an `amk_` bearer is handed to the OIDC verifier and gets 401 |
-| `AGENT_API_KEYS` malformed, empty, duplicate key, bad name, missing token | process refuses to start, naming the problem |
-| `AGENT_API_KEYS` set with `AUTH_MODE=token` | process refuses to start |
-| Unknown `amk_` key | 401, no session, no outbound call |
-| Unknown or expired opaque OIDC token | 401 (found during the local smoke test: the provider threw a plain `Error`, which the SDK maps to 500 and which stops clients from re-authenticating; fixed to `InvalidTokenError`) |
-| Valid key, ArgoCD token revoked | session starts; first tool call returns ArgoCD's 401 as a tool error |
-| Valid key, ArgoCD unreachable | tool calls return the client error, as in token mode |
-| Machine request reuses an OIDC session id (or vice versa) | 400 invalid session |
-| Machine session passes `argocdBaseUrl` for another host | ignored; pinned URL used |
-| Machine session calls a mutating tool its account may not use | ArgoCD 403 as tool error |
-| Session capacity full | 503, as for OIDC |
-| Stateless mode | verifier runs per request; works unchanged |
+| Flag unset | header ignored; the request takes the OIDC path and gets 401 without a bearer |
+| Flag set with `AUTH_MODE=token` | process refuses to start |
+| Token header and `Authorization` together | 400, nothing verified |
+| Token ArgoCD rejects (invalid, expired, revoked, deleted account) | 401 at session start, no session, reason logged |
+| ArgoCD unreachable or 5xx at session start | 503, no session |
+| Another token presenting the session id | 400 invalid session |
+| OIDC bearer presenting a passthrough session id | 400 invalid session |
+| Token revoked after the session started | ArgoCD 401 on the next call, returned as the tool result; session dies on idle timeout |
+| Tool the account may not use | ArgoCD 403 as tool result |
+| Session capacity full | 503 |
+| Stateless | verified per request; no session kept |
 
 ## Testing
 
-- Unit, config: every refusal above, plus a valid object; the `AUTH_MODE` check.
-- Unit, verifier: routing by prefix; constant-time compare across all keys
-  (a miss touches every key); unknown key throws `InvalidTokenError`; the OIDC
-  path still delegates to the provider.
-- Unit, session binding: the owner that added a session reuses it; any other
-  owner, ownerless lookups included, is refused and does not touch the idle
-  clock. Owner resolution: a key is `apikey:<name>`, an OIDC bearer is
-  `oidc:<session id>`, and a token record without a session id fails closed.
-- Unit, server: machine construction pins the base URL and uses the static token
-  (reuses the `oidcTransport.test.ts` pattern); `principal` is logged per call
-  and absent otherwise.
-- Handler: the oidc `POST /mcp` handler is a factory (`createOidcMcpHandler`)
-  driven with a fake transport and server: machine initialize (credentials,
-  owner, start log with the client address), reuse by the owner, refusal of
-  another principal, OIDC initialize (provider, no principal, owned by the
-  login, not by the registered client), stateless (nothing kept, start logged
-  per request, transport and server released when the response closes), the
-  session's `onclose` forgetting it, the 400 and 503 paths.
-- Not unit-testable: `connectHttpTransport` itself (OIDC discovery against a
-  live ArgoCD, `process.exit`). Covered by the non-prod validation recorded on
-  OPS-6124: OIDC login still works with keys loaded; an `amk_` session calls
-  `list_applications`; a wrong key gets 401; a session id cannot be reused by
-  another principal; the account's RBAC refuses a sync.
+- Unit, flag/routing/naming/verification (`argocdTokenPassthrough.test.ts`):
+  flag parsing and refusal; the routing table; principal naming; userinfo
+  outcomes with an injected fetch; the middleware (off, no header, ambiguous,
+  session start verifies and attaches, reuse does not verify, stateless
+  verifies, SSO email never attached, 401/503 with a log line and no next).
+- Unit, session credentials: owner by fingerprint; OIDC owner by login; fail
+  closed without a session id; credentials for both paths.
+- Handler (`oidcMcpHandler.test.ts`): passthrough and OIDC initialize, reuse
+  by the owner, refusal of another principal, stateless, lifecycle hooks, 400
+  and 503.
+- Not unit-testable: `connectHttpTransport` itself. Covered by the local
+  end-to-end run against a fake ArgoCD with a userinfo endpoint, then the
+  non-prod validation recorded on OPS-6124.
 
 ## Observability
 
-No OpenTelemetry in this repo today; this change adds none. Logging as under
-Attribution.
+No OpenTelemetry in this repo today; this change adds none. Logging as above.
 
 ## Rollout / rollback
 
-- One image for every ArgoCD MCP. `AGENT_API_KEYS` is set only on
-  `argocd-mcp-production`, after non-prod has confirmed OIDC login on the new
-  image.
-- The pod reads `AGENT_API_KEYS` from a Kubernetes secret that terraform builds
-  from `global.etfvars` entries, as `projects/global/eks-apps/edge_logs_mcp.tf`
-  does; the DevOps Agent's registration reads the same entry.
-- Rotation: add a new name and key, roll the pod, move the caller, remove the old
-  entry. ArgoCD token rotation: generate a new token, update the entry, roll the
-  pod, `argocd account delete-token` the old one.
-- Rollback: unset `AGENT_API_KEYS` (the machine path disappears) or pin the
-  previous image tag.
-
-## Follow-up (not this change)
-
-Upstream's GHSA-rp45-5x3v-48mr fix (`MCP_AUTH_TOKEN`, loopback bind by default,
-Host/Origin validation) is not in this fork. It does not affect oidc-mode
-instances, which `requireBearerAuth` already gates, but it must be merged before
-any token-mode instance is ever exposed on a network. Merging changes the bind
-default, so every deployment will need `MCP_BIND_ADDRESS` or
-`--allow-unauthenticated`. Separate ticket.
+- One image for every ArgoCD MCP. `MCP_ALLOW_ARGOCD_TOKEN` is set only on
+  `argocd-mcp-production`, after non-prod has validated the image.
+- The DevOps Agent registration carries the `devops-agent` ArgoCD token as an
+  `api_key` with header `x-argocd-api-token`, from one etfvars entry under
+  `eu-west-1@service`. No pod secret is needed.
+- Rollback: unset the flag (the passthrough path closes) or pin the previous
+  image tag. Revoking the caller: `argocd account delete-token`.
 
 ## Non-goals
 
-- Per-key tool allowlists in the MCP (ArgoCD RBAC is the permission model).
-- A key store or management API (keys are static configuration).
-- `X-API-Key` or raw `Authorization` forms.
-- Attribution of human sessions in tool-call logs.
-- OpenTelemetry.
+- Server-issued machine identities (the superseded design).
+- `client_credentials` OAuth in bundled Dex.
+- Per-caller tool allowlists in the server; OpenTelemetry.

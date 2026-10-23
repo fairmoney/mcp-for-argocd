@@ -327,7 +327,7 @@ When a client initiates a session, the server redirects to Dex for user authenti
 | `ARGOCD_BASE_URL` | Yes* | — | ArgoCD server URL (http or https); used for token validation. |
 | `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | OIDC client ID registered with Dex. No default (required in oidc mode); conventional/example value: `argocd-mcp`. |
 | `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE` | Yes* | — | Path to a file containing the OIDC client secret (e.g., `/secrets/oidc/clientSecret`). |
-| `AGENT_API_KEYS` | No | — | Named machine API keys accepted beside the SSO login; see [Machine API keys](#machine-api-keys-oidc-mode). oidc mode only. |
+| `MCP_ALLOW_ARGOCD_TOKEN` | No | `false` | `true` also accepts a caller's own ArgoCD API token in `x-argocd-api-token`; see [ArgoCD token passthrough](#argocd-token-passthrough-oidc-mode). oidc mode only. |
 | `TOKEN_STORE` | No | `memory` | Token storage: `memory` (single-replica) or `redis` (horizontally scalable; requires Redis >= 6.2). |
 | `REDIS_URL` | No | — | Redis connection URL (required if `TOKEN_STORE=redis`). |
 | `TOKEN_STORE_ENCRYPTION_KEY_FILE` | No | — | Path to a 32-byte AES-256 key file for at-rest token encryption (optional). |
@@ -341,28 +341,18 @@ When a client initiates a session, the server redirects to Dex for user authenti
 
 For full deployment instructions, see [`deploy/README.md`](deploy/README.md).
 
-#### Machine API keys (oidc mode)
+#### ArgoCD token passthrough (oidc mode)
 
-A machine caller (an automation agent, a CI job) cannot complete a browser login. In oidc mode the server can also accept **named machine API keys**, configured on the pod, each bound to its own ArgoCD API token. Set `AGENT_API_KEYS` to a JSON object:
-
-```json
-{
-  "devops-agent": { "keySha256": "<sha256 of the key, 64 lowercase hex>", "argocdToken": "<ArgoCD API token>" }
-}
-```
-
-- A **name** is `[a-z0-9-]+` and is the caller's principal, logged as `apikey:<name>`.
-- A **key** is `amk_` plus 64 lowercase hex characters: `printf 'amk_%s\n' "$(openssl rand -hex 32)"`. The caller presents it as `Authorization: Bearer amk_…`. The pod holds only `keySha256` (`printf '%s' "$key" | sha256sum`), so a compromised pod yields no inbound key.
-- `argocdToken` is the token of a local ArgoCD account created for that caller (`argocd account generate-token --account <name>`). **Permissions are ArgoCD's**: the key can do exactly what that account's RBAC allows, no more and no less; the server registers the same tool set for every session (`MCP_READ_ONLY` and `MCP_ENABLE_RESOURCE_MUTATIONS` still apply process-wide), and a call the account may not make returns ArgoCD's 403 as the tool error.
+A machine caller (an automation agent, a CI job) cannot complete a browser login. With `MCP_ALLOW_ARGOCD_TOKEN=true` the oidc-mode server also accepts a caller's **own ArgoCD API token** in the `x-argocd-api-token` header, the same header token mode uses, and calls ArgoCD with it. The server issues no identity of its own: **permissions are ArgoCD's**, the token can do exactly what its account's RBAC allows, and the server registers the same tool set for every session (`MCP_READ_ONLY` and `MCP_ENABLE_RESOURCE_MUTATIONS` apply process-wide; a call the account may not make returns ArgoCD's 403 as the tool error). Create a local ArgoCD account per caller (`accounts.<name>: apiKey`, `argocd account generate-token --account <name>`) so each caller has its own RBAC and can be revoked on its own.
 
 Behaviour:
 
-- A bearer token is routed by its shape, never by header name: a key-shaped token (`amk_` + 64 hex) is hashed and compared against every configured hash in constant time; anything else goes to the OIDC verifier unchanged. An unknown key gets `401`, creates no session and makes no request to ArgoCD.
-- A machine session's base URL is pinned to `ARGOCD_BASE_URL`: `x-argocd-base-url`, the `argocdBaseUrl` tool argument and the token registry are ignored, so a key's ArgoCD token is only ever sent to the configured instance.
-- A session id is only usable by the principal that opened it: the login it came from for an OIDC bearer (not the registered MCP client, which a hosted connector shares between people), or `apikey:<name>` for a key.
-- Every tool call of a machine session is logged with its principal, the tool name and the outcome (never arguments or results; the outcome says whether the call completed, ArgoCD's own 403/404 come back as the result text). The session start is logged with the client address; in [stateless mode](#stateless-mode) that line is emitted per request, with `stateless: true`. Keys and tokens are never logged.
-- Startup refuses invalid JSON, an empty object, a bad name or hash, the same hash under two names, a missing `argocdToken`, and the variable outside `AUTH_MODE=oidc`. Unset means no machine path at all.
-- Rotation: add the new key under a new name, roll the pod, move the caller, remove the old entry. To rotate an ArgoCD token, generate a new one, update the entry, roll the pod, then `argocd account delete-token` the old one.
+- Off by default; unset means the OIDC bearer is the only way in. The flag is refused outside `AUTH_MODE=oidc` (token mode is passthrough by nature).
+- A request with `x-argocd-api-token` and no `Authorization` takes the passthrough path; one with only `Authorization` takes the OIDC path exactly as before; one with both is refused (`400`), the server never guesses which identity was meant.
+- When a session starts (and on every request in [stateless mode](#stateless-mode)) the token is checked once against ArgoCD's `GET /api/v1/session/userinfo`: not logged in → `401`, no session created; ArgoCD unavailable → `503`, never a pass. A request that reuses a session needs no round trip: the session is owned by the token's SHA-256, so only the same token can pick it up.
+- The base URL is pinned to `ARGOCD_BASE_URL`: `x-argocd-base-url`, the `argocdBaseUrl` tool argument and the token registry are ignored, so a forwarded token is only ever sent to the configured instance.
+- Every tool call of a passthrough session is logged with its principal, the tool name and the outcome (never arguments or results; the outcome says whether the call completed, ArgoCD's own 403/404 come back as the result text). The session start is logged with the client address (per request in stateless mode, with `stateless: true`). The principal is `argocd:<account>` for a local ArgoCD account and `argocd-token:<8 hex of the fingerprint>` for anything else, so an SSO user's email never reaches a log line. Tokens are never logged.
+- Rejections are logged with a reason, never the token.
 
 ## For Development
 
