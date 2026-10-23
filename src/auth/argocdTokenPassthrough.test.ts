@@ -10,7 +10,7 @@ import {
   passthroughAuthOf,
   principalFor,
   resolveAllowArgocdToken,
-  PASSTHROUGH_AUTH_TTL_SEC,
+  createAuthDispatcher,
   PassthroughRejected,
   verifyArgocdToken
 } from './argocdTokenPassthrough.js';
@@ -53,12 +53,14 @@ test('classifyRequest: off or no token header means the OIDC path; both credenti
 
 // --- naming ---------------------------------------------------------------------
 
-test('principalFor names a local account and fingerprints anything else', () => {
+test('principalFor names a local account by issuer and fingerprints anything else', () => {
   const fp = 'a'.repeat(64);
-  assert.equal(principalFor('devops-agent', fp), 'argocd:devops-agent');
-  assert.equal(principalFor('someone@example.com', fp), 'argocd-token:aaaaaaaa');
-  assert.equal(principalFor(undefined, fp), 'argocd-token:aaaaaaaa');
-  assert.equal(principalFor('Mixed.Case', fp), 'argocd-token:aaaaaaaa');
+  assert.equal(principalFor('devops-agent', 'argocd', fp), 'argocd:devops-agent');
+  // An SSO user with a bare handle is still a person: the issuer says so.
+  assert.equal(principalFor('jdoe', 'https://argocd/api/dex', fp), 'argocd-token:aaaaaaaa');
+  assert.equal(principalFor('someone@example.com', 'argocd', fp), 'argocd-token:aaaaaaaa');
+  assert.equal(principalFor('devops-agent', undefined, fp), 'argocd-token:aaaaaaaa');
+  assert.equal(principalFor(undefined, 'argocd', fp), 'argocd-token:aaaaaaaa');
 });
 
 test('fingerprintOf is the SHA-256 of the token', () => {
@@ -67,33 +69,52 @@ test('fingerprintOf is the SHA-256 of the token', () => {
 
 // --- verification against ArgoCD ------------------------------------------------
 
-const fetchAnswering = (
-  status: number,
-  body?: unknown,
-  calls: { url: string; auth?: string }[] = []
-) =>
+type FetchCall = { url: string; auth?: string; hasTimeout: boolean };
+const fetchAnswering = (status: number, body?: unknown, calls: FetchCall[] = [], raw = false) =>
   (async (url: string | URL | globalThis.Request, init?: RequestInit) => {
     calls.push({
       url: String(url),
-      auth: (init?.headers as Record<string, string>)?.Authorization
+      auth: (init?.headers as Record<string, string>)?.Authorization,
+      hasTimeout: init?.signal instanceof AbortSignal
     });
-    return new globalThis.Response(body === undefined ? null : JSON.stringify(body), {
+    const payload = body === undefined ? null : raw ? String(body) : JSON.stringify(body);
+    return new globalThis.Response(payload, {
       status,
-      headers: { 'content-type': 'application/json' }
+      headers: { 'content-type': raw ? 'text/html' : 'application/json' }
     });
   }) as typeof fetch;
 
-test('verifyArgocdToken asks userinfo with the token and returns the username when logged in', async () => {
-  const calls: { url: string; auth?: string }[] = [];
+test('verifyArgocdToken asks userinfo with the token, under a deadline, and returns who it is', async () => {
+  const calls: FetchCall[] = [];
   const result = await verifyArgocdToken(
     'https://argocd.example.com/',
     'tok',
-    fetchAnswering(200, { loggedIn: true, username: 'devops-agent' }, calls)
+    fetchAnswering(200, { loggedIn: true, username: 'devops-agent', iss: 'argocd' }, calls)
   );
-  assert.deepEqual(result, { username: 'devops-agent' });
+  assert.deepEqual(result, { username: 'devops-agent', iss: 'argocd' });
   assert.deepEqual(calls, [
-    { url: 'https://argocd.example.com/api/v1/session/userinfo', auth: 'Bearer tok' }
+    {
+      url: 'https://argocd.example.com/api/v1/session/userinfo',
+      auth: 'Bearer tok',
+      hasTimeout: true
+    }
   ]);
+});
+
+test('verifyArgocdToken: a non-JSON 2xx is a 503 and the body never enters the message', async () => {
+  await assert.rejects(
+    verifyArgocdToken(
+      'https://argocd',
+      'tok',
+      fetchAnswering(200, '<html>login page SECRET-MARKER</html>', [], true)
+    ),
+    (e: unknown) => {
+      assert.ok(e instanceof PassthroughRejected);
+      assert.equal(e.status, 503);
+      assert.doesNotMatch(e.message, /SECRET-MARKER|html/);
+      return true;
+    }
+  );
 });
 
 test('verifyArgocdToken: not logged in, 401 and 403 are a 401; other failures are a 503', async () => {
@@ -147,7 +168,7 @@ const run = async (
       deps.verify ??
       (async (_base, token) => {
         verifyCalls.push(token);
-        return { username: 'devops-agent' };
+        return { username: 'devops-agent', iss: 'argocd' };
       })
   });
   const req = makeReq(headers);
@@ -180,7 +201,6 @@ test('middleware: both credentials is a 400 and stops there', async () => {
 });
 
 test('middleware: a session start verifies the token with ArgoCD and attaches the identity', async () => {
-  const before = Math.floor(Date.now() / 1000);
   const r = await run({ 'x-argocd-api-token': ' tok ' }, {});
 
   assert.deepEqual(r.verifyCalls, ['tok']);
@@ -192,9 +212,7 @@ test('middleware: a session start verifies the token with ArgoCD and attaches th
     fingerprint: fingerprintOf('tok'),
     principal: 'argocd:devops-agent'
   });
-  const info = r.req.auth as { clientId: string; expiresAt: number };
-  assert.equal(info.clientId, 'argocd:devops-agent');
-  assert.ok(info.expiresAt >= before + PASSTHROUGH_AUTH_TTL_SEC - 1);
+  assert.equal((r.req.auth as { clientId: string }).clientId, 'argocd:devops-agent');
 });
 
 test('middleware: a session reuse attaches the identity without asking ArgoCD', async () => {
@@ -215,7 +233,7 @@ test('middleware: stateless verifies on every request, session id or not', async
 test('middleware: an SSO user token is named by fingerprint, never by email', async () => {
   const r = await run(
     { 'x-argocd-api-token': 'tok' },
-    { verify: async () => ({ username: 'someone@example.com' }) }
+    { verify: async () => ({ username: 'someone@example.com', iss: 'argocd' }) }
   );
   assert.equal(
     passthroughAuthOf(r.req.auth as never)?.principal,
@@ -255,4 +273,43 @@ test('middleware: ArgoCD rejecting the token is a 401, ArgoCD unavailable a 503,
   }
   assert.equal(warned.length, 2);
   assert.doesNotMatch(JSON.stringify(warned), /sekrit/);
+});
+
+// --- dispatcher ----------------------------------------------------------------
+
+test('dispatcher: the OIDC route gets the bearer check, token routes get the passthrough middleware', () => {
+  const seen: string[] = [];
+  const dispatch = createAuthDispatcher({
+    allowArgocdToken: true,
+    passthrough: () => {
+      seen.push('passthrough');
+    },
+    bearerAuth: () => {
+      seen.push('bearer');
+    }
+  });
+  const next = (() => {}) as NextFunction;
+  const res = makeRes().res;
+
+  dispatch(makeReq({ authorization: 'Bearer opaque' }), res, next);
+  dispatch(makeReq({}), res, next);
+  dispatch(makeReq({ 'x-argocd-api-token': 'tok' }), res, next);
+  dispatch(makeReq({ 'x-argocd-api-token': 'tok', authorization: 'Bearer x' }), res, next);
+
+  assert.deepEqual(seen, ['bearer', 'bearer', 'passthrough', 'passthrough']);
+});
+
+test('dispatcher: with the flag off everything is the bearer check, token header or not', () => {
+  const seen: string[] = [];
+  const dispatch = createAuthDispatcher({
+    allowArgocdToken: false,
+    passthrough: () => {
+      seen.push('passthrough');
+    },
+    bearerAuth: () => {
+      seen.push('bearer');
+    }
+  });
+  dispatch(makeReq({ 'x-argocd-api-token': 'tok' }), makeRes().res, (() => {}) as NextFunction);
+  assert.deepEqual(seen, ['bearer']);
 });

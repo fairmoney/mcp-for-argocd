@@ -14,8 +14,9 @@ interface SessionEntry {
   transport: ClosableTransport;
   server: ClosableServer;
   lastActivityMs: number;
-  // The principal that opened the session (an OIDC clientId or "apikey:<name>");
-  // undefined in token mode, which has no inbound identity.
+  // The principal that opened the session ("oidc:<login>" or
+  // "argocd-token:<fingerprint>"); undefined in token mode, which has no
+  // inbound identity.
   owner?: string;
 }
 

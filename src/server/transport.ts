@@ -9,6 +9,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
 import { resolveAuthMode, loadOidcConfig } from '../auth/config.js';
 import {
+  createAuthDispatcher,
   createPassthroughMiddleware,
   resolveAllowArgocdToken
 } from '../auth/argocdTokenPassthrough.js';
@@ -165,16 +166,18 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
   // stateless mode (transports are per-request and closed on response end).
   const sessions = new HttpSessionManager(resolveHttpSessionOptions());
 
+  // ArgoCD token passthrough (MCP_ALLOW_ARGOCD_TOKEN) sits beside the OIDC
+  // login; off means the OIDC bearer is the only way in. Resolved before the
+  // mode check so that setting it in token mode refuses to start, as the docs
+  // say, rather than being ignored.
+  const allowArgocdToken = resolveAllowArgocdToken();
+
   if (resolveAuthMode() === 'oidc') {
     const config = loadOidcConfig();
     logger.info(
       { clientMode: config.mode, clientId: config.clientId },
       'OIDC client mode resolved'
     );
-    // ArgoCD token passthrough (MCP_ALLOW_ARGOCD_TOKEN) sits beside the OIDC
-    // login; off means the OIDC bearer is the only way in. A bad flag value
-    // throws here and stops startup.
-    const allowArgocdToken = resolveAllowArgocdToken();
     if (allowArgocdToken) {
       logger.info('ArgoCD token passthrough enabled (x-argocd-api-token)');
     }
@@ -239,24 +242,21 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
       }
     });
 
-    // A forwarded ArgoCD token attaches its own AuthInfo and skips the OIDC
-    // bearer check; everything else must carry a bearer the provider issued.
-    const passthrough = createPassthroughMiddleware({
+    // One dispatcher decides per request: a forwarded ArgoCD token goes to
+    // the passthrough middleware, everything else to the SDK's bearer check.
+    const authenticate = createAuthDispatcher({
       allowArgocdToken,
-      argocdBaseUrl: config.argocdBaseUrl,
-      stateless
+      passthrough: createPassthroughMiddleware({
+        allowArgocdToken,
+        argocdBaseUrl: config.argocdBaseUrl,
+        stateless
+      }),
+      bearerAuth: requireBearerAuth({ verifier: provider })
     });
-    const bearerAuth = requireBearerAuth({ verifier: provider });
-    const bearerAuthUnlessPassthrough = (
-      req: express.Request,
-      res: express.Response,
-      next: express.NextFunction
-    ) => (req.auth ? next() : bearerAuth(req, res, next));
 
     app.post(
       '/mcp',
-      passthrough,
-      bearerAuthUnlessPassthrough,
+      authenticate,
       createOidcMcpHandler({
         sessions,
         stateless,

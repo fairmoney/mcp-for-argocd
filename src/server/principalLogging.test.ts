@@ -47,7 +47,7 @@ test('a server with a principal logs every tool call with principal, tool and ou
     argocdBaseUrl: DEFAULT_BASE_URL,
     argocdApiToken: '',
     tokenRegistry: new TokenRegistry(),
-    principal: 'apikey:devops-agent'
+    principal: 'argocd:devops-agent'
   });
 
   const calls = await captureInfo(async () => {
@@ -57,7 +57,7 @@ test('a server with a principal logs every tool call with principal, tool and ou
 
   const line = calls.find((c) => c.fields.tool === 'get_application');
   assert.ok(line, 'a log line for the tool call is emitted');
-  assert.equal(line.fields.principal, 'apikey:devops-agent');
+  assert.equal(line.fields.principal, 'argocd:devops-agent');
   assert.equal(line.fields.outcome, 'error');
   // Arguments and results stay out of the log line.
   assert.equal('applicationName' in line.fields, false);

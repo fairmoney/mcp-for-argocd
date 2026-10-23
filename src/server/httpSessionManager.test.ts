@@ -116,9 +116,9 @@ test('get() returns the transport only to the owner that added the session', () 
   const clock = makeClock();
   const mgr = new HttpSessionManager({ idleTimeoutMs: 1000, now: clock.now, disableTimer: true });
   const p = makePair();
-  mgr.add('s1', p.transport, p.server, 'apikey:devops-agent');
+  mgr.add('s1', p.transport, p.server, 'argocd:devops-agent');
 
-  assert.equal(mgr.get('s1', 'apikey:devops-agent'), p.transport);
+  assert.equal(mgr.get('s1', 'argocd:devops-agent'), p.transport);
   assert.equal(mgr.get('s1', 'client-abc'), undefined, 'another principal must be refused');
   assert.equal(mgr.get('s1'), undefined, 'an ownerless lookup must not match an owned session');
 });
@@ -143,5 +143,5 @@ test('ownerless sessions (token mode) keep working with ownerless lookups only',
   mgr.add('s1', p.transport, p.server);
 
   assert.equal(mgr.get('s1'), p.transport);
-  assert.equal(mgr.get('s1', 'apikey:devops-agent'), undefined);
+  assert.equal(mgr.get('s1', 'argocd:devops-agent'), undefined);
 });

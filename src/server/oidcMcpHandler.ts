@@ -43,7 +43,7 @@ const jsonRpcError = (res: Response, status: number, message: string, id: unknow
 };
 
 // The oidc-mode POST /mcp handler. It runs behind requireBearerAuth, so
-// req.auth is always a verified OIDC login or machine key. Each HTTP session
+// req.auth is always a verified OIDC login or ArgoCD token. Each HTTP session
 // is bound to the owner that opened it and is built with that owner's ArgoCD
 // credentials; a request for someone else's session id is told there is no
 // such session.

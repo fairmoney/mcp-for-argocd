@@ -26,8 +26,9 @@ type ServerInfo = {
   // When set (oidc mode), build the ArgoCD client with this refreshable
   // bearer-token source instead of the static argocdApiToken string.
   tokenSource?: TokenSource;
-  // When set, every tool call is logged with it (machine sessions:
-  // "apikey:<name>"). Unset for people, so nothing is logged about them here.
+  // When set, every tool call is logged with it (passthrough sessions:
+  // "argocd:<account>" or "argocd-token:<fingerprint>"). Unset for OIDC
+  // logins, so nothing is logged about people here.
   principal?: string;
 };
 

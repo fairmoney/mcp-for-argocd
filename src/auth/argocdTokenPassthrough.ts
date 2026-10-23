@@ -13,10 +13,10 @@ import { logger } from '../logging/logging.js';
 
 export const ARGOCD_TOKEN_HEADER = 'x-argocd-api-token';
 
-// The SDK's bearer middleware refuses an AuthInfo without expiresAt; a
-// passthrough token's own lifetime is ArgoCD's business, so each session start
-// stamps a window that outlives the request. Nothing is stored against it.
-export const PASSTHROUGH_AUTH_TTL_SEC = 60 * 60;
+// How long a session start waits for ArgoCD's userinfo answer. Undici's own
+// defaults would let a connected-but-silent ArgoCD hold the request for
+// minutes; past this the existing catch maps the abort to a 503.
+export const USERINFO_TIMEOUT_MS = 10_000;
 
 // What a passthrough session carries on req.auth.extra.
 export interface PassthroughAuth {
@@ -66,6 +66,8 @@ export const classifyRequest = (
   const token = headers[ARGOCD_TOKEN_HEADER];
   const hasToken = typeof token === 'string' && token.trim() !== '';
   if (!allowArgocdToken || !hasToken) return 'oidc';
+  // An empty Authorization header counts as absent: there is no second
+  // credential in it to be ambiguous about.
   return headers['authorization'] ? 'ambiguous' : 'passthrough';
 };
 
@@ -75,12 +77,20 @@ export const fingerprintOf = (token: string): string =>
   createHash('sha256').update(token).digest('hex');
 
 const LOCAL_ACCOUNT = /^[a-z0-9-]+$/;
+// ArgoCD signs its local-account tokens with this issuer; SSO tokens carry
+// the Dex (or external OIDC) issuer URL.
+const LOCAL_ISSUER = 'argocd';
 
 // A local ArgoCD account name (devops-agent, cerberus) is fine to log. An SSO
-// user's username is an email, which must not reach a log line, so such a
-// token is named by its fingerprint instead.
-export const principalFor = (username: string | undefined, fingerprint: string): string =>
-  username && LOCAL_ACCOUNT.test(username)
+// user's username is a person (usually an email) and must not reach a log
+// line, so such a token is named by its fingerprint. The issuer decides which
+// is which; the name pattern is only a last guard on what is logged.
+export const principalFor = (
+  username: string | undefined,
+  iss: string | undefined,
+  fingerprint: string
+): string =>
+  iss === LOCAL_ISSUER && username && LOCAL_ACCOUNT.test(username)
     ? `argocd:${username}`
     : `argocd-token:${fingerprint.slice(0, 8)}`;
 
@@ -101,11 +111,12 @@ export const verifyArgocdToken = async (
   argocdBaseUrl: string,
   token: string,
   fetchImpl: typeof fetch = fetch
-): Promise<{ username?: string }> => {
+): Promise<{ username?: string; iss?: string }> => {
   let response: globalThis.Response;
   try {
     response = await fetchImpl(`${argocdBaseUrl.replace(/\/+$/, '')}/api/v1/session/userinfo`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(USERINFO_TIMEOUT_MS)
     });
   } catch (error) {
     throw new PassthroughRejected(
@@ -119,9 +130,15 @@ export const verifyArgocdToken = async (
   if (!response.ok) {
     throw new PassthroughRejected(503, `ArgoCD answered ${response.status} to userinfo`);
   }
-  const info = (await response.json()) as { loggedIn?: boolean; username?: string };
+  let info: { loggedIn?: boolean; username?: string; iss?: string };
+  try {
+    info = (await response.json()) as typeof info;
+  } catch {
+    // Not the parser's message: it quotes the start of the body.
+    throw new PassthroughRejected(503, 'ArgoCD answered userinfo with a non-JSON body');
+  }
   if (info.loggedIn !== true) throw new PassthroughRejected(401, 'ArgoCD rejected the token');
-  return { username: info.username };
+  return { username: info.username, iss: info.iss };
 };
 
 export interface PassthroughMiddlewareDeps {
@@ -157,14 +174,16 @@ export const createPassthroughMiddleware = (deps: PassthroughMiddlewareDeps) => 
     let principal = `argocd-token:${fingerprint.slice(0, 8)}`;
     if (sessionStart) {
       try {
-        const { username } = await verify(deps.argocdBaseUrl, token);
-        principal = principalFor(username, fingerprint);
+        const { username, iss } = await verify(deps.argocdBaseUrl, token);
+        principal = principalFor(username, iss, fingerprint);
       } catch (error) {
         const rejected =
           error instanceof PassthroughRejected
             ? error
             : new PassthroughRejected(503, String(error));
         logger.warn({ reason: rejected.message, status: rejected.status }, 'Bearer token rejected');
+        // Deliberately no WWW-Authenticate: a machine presenting a bad token
+        // must not be bounced into the browser OAuth flow.
         res.status(rejected.status).json({
           error: rejected.status === 401 ? 'invalid_token' : 'temporarily_unavailable',
           error_description:
@@ -183,9 +202,29 @@ export const createPassthroughMiddleware = (deps: PassthroughMiddlewareDeps) => 
       token,
       clientId: principal,
       scopes: [],
-      expiresAt: Math.floor(Date.now() / 1000) + PASSTHROUGH_AUTH_TTL_SEC,
       extra
     };
     next();
   };
+};
+
+// The one place that decides which authentication a /mcp request gets. The
+// OIDC path is the SDK's bearer check, unchanged; the passthrough path is the
+// middleware above, which also answers the ambiguous case. Calling
+// classifyRequest here, once, is what makes the contract explicit rather than
+// a side effect of req.auth having been set.
+export type AuthMiddleware = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => void | Promise<void>;
+export const createAuthDispatcher = (deps: {
+  allowArgocdToken: boolean;
+  passthrough: AuthMiddleware;
+  bearerAuth: AuthMiddleware;
+}): AuthMiddleware => {
+  return (req, res, next) =>
+    classifyRequest(req.headers, deps.allowArgocdToken) === 'oidc'
+      ? deps.bearerAuth(req, res, next)
+      : deps.passthrough(req, res, next);
 };
