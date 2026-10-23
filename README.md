@@ -327,6 +327,7 @@ When a client initiates a session, the server redirects to Dex for user authenti
 | `ARGOCD_BASE_URL` | Yes* | — | ArgoCD server URL (http or https); used for token validation. |
 | `ARGOCD_MCP_OIDC_CLIENT_ID` | Yes* | — | OIDC client ID registered with Dex. No default (required in oidc mode); conventional/example value: `argocd-mcp`. |
 | `ARGOCD_MCP_OIDC_CLIENT_SECRET_FILE` | Yes* | — | Path to a file containing the OIDC client secret (e.g., `/secrets/oidc/clientSecret`). |
+| `MCP_ALLOW_ARGOCD_TOKEN` | No | `false` | `true` also accepts a caller's own ArgoCD API token in `x-argocd-api-token`; see [ArgoCD token passthrough](#argocd-token-passthrough-oidc-mode). oidc mode only. |
 | `TOKEN_STORE` | No | `memory` | Token storage: `memory` (single-replica) or `redis` (horizontally scalable; requires Redis >= 6.2). |
 | `REDIS_URL` | No | — | Redis connection URL (required if `TOKEN_STORE=redis`). |
 | `TOKEN_STORE_ENCRYPTION_KEY_FILE` | No | — | Path to a 32-byte AES-256 key file for at-rest token encryption (optional). |
@@ -339,6 +340,19 @@ When a client initiates a session, the server redirects to Dex for user authenti
 **Multi-replica Redis store (production):** For horizontally scalable deployments, set `TOKEN_STORE=redis` and point `REDIS_URL` to a managed or in-cluster Redis instance (version >= 6.2 required for atomic `GETDEL` operations).
 
 For full deployment instructions, see [`deploy/README.md`](deploy/README.md).
+
+#### ArgoCD token passthrough (oidc mode)
+
+A machine caller (an automation agent, a CI job) cannot complete a browser login. With `MCP_ALLOW_ARGOCD_TOKEN=true` the oidc-mode server also accepts a caller's **own ArgoCD API token** in the `x-argocd-api-token` header, the same header token mode uses, and calls ArgoCD with it. The server issues no identity of its own: **permissions are ArgoCD's**, the token can do exactly what its account's RBAC allows, and the server registers the same tool set for every session (`MCP_READ_ONLY` and `MCP_ENABLE_RESOURCE_MUTATIONS` apply process-wide; a call the account may not make returns ArgoCD's 403 as the tool error). Create a local ArgoCD account per caller (`accounts.<name>: apiKey`, `argocd account generate-token --account <name>`) so each caller has its own RBAC and can be revoked on its own.
+
+Behaviour:
+
+- Off by default; unset means the OIDC bearer is the only way in. The flag is refused outside `AUTH_MODE=oidc` on the HTTP transport (token mode is passthrough by nature); the stdio and SSE transports have no auth mode and ignore it.
+- A request with `x-argocd-api-token` and no `Authorization` takes the passthrough path; one with only `Authorization` takes the OIDC path exactly as before; one with both is refused (`400`), the server never guesses which identity was meant.
+- When a session starts (and on every request in [stateless mode](#stateless-mode)) the token is checked once against ArgoCD's `GET /api/v1/session/userinfo`: not logged in → `401`, no session created; ArgoCD unavailable → `503`, never a pass. A request that reuses a session needs no round trip: the session is owned by the token's SHA-256, so only the same token can pick it up.
+- The base URL is pinned to `ARGOCD_BASE_URL`: `x-argocd-base-url`, the `argocdBaseUrl` tool argument and the token registry are ignored, so a forwarded token is only ever sent to the configured instance.
+- Every tool call of a passthrough session is logged with its principal, the tool name and the outcome (never arguments or results; the outcome says whether the call completed, ArgoCD's own 403/404 come back as the result text). The session start is logged with the client address (per request in stateless mode, with `stateless: true`). The principal is `argocd:<account>` for a local ArgoCD account and `argocd-token:<8 hex of the fingerprint>` for anything else, so an SSO user's email never reaches a log line. Tokens are never logged.
+- Rejections are logged with a reason, never the token.
 
 ## For Development
 

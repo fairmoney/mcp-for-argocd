@@ -106,3 +106,42 @@ test('dispose() closes all live sessions', () => {
   assert.equal(a.state.serverClosed, true);
   assert.equal(b.state.serverClosed, true);
 });
+
+// --- Owner binding ------------------------------------------------------------
+//
+// A session id is only usable by the principal that opened it. Without this,
+// any authenticated caller who learns a session's UUID could drive it.
+
+test('get() returns the transport only to the owner that added the session', () => {
+  const clock = makeClock();
+  const mgr = new HttpSessionManager({ idleTimeoutMs: 1000, now: clock.now, disableTimer: true });
+  const p = makePair();
+  mgr.add('s1', p.transport, p.server, 'argocd:devops-agent');
+
+  assert.equal(mgr.get('s1', 'argocd:devops-agent'), p.transport);
+  assert.equal(mgr.get('s1', 'client-abc'), undefined, 'another principal must be refused');
+  assert.equal(mgr.get('s1'), undefined, 'an ownerless lookup must not match an owned session');
+});
+
+test('a refused get() does not reset the idle clock', () => {
+  const clock = makeClock();
+  const mgr = new HttpSessionManager({ idleTimeoutMs: 1000, now: clock.now, disableTimer: true });
+  const p = makePair();
+  mgr.add('s1', p.transport, p.server, 'owner-a');
+
+  clock.advanceMs(900);
+  assert.equal(mgr.get('s1', 'owner-b'), undefined);
+  clock.advanceMs(200); // 1100 since add; the refused lookup must not have touched it
+  mgr.sweepIdle();
+  assert.equal(mgr.size, 0, 'session must be reaped as idle');
+});
+
+test('ownerless sessions (token mode) keep working with ownerless lookups only', () => {
+  const clock = makeClock();
+  const mgr = new HttpSessionManager({ idleTimeoutMs: 1000, now: clock.now, disableTimer: true });
+  const p = makePair();
+  mgr.add('s1', p.transport, p.server);
+
+  assert.equal(mgr.get('s1'), p.transport);
+  assert.equal(mgr.get('s1', 'argocd:devops-agent'), undefined);
+});
