@@ -303,6 +303,8 @@ When the bind is widened and a proxy or mesh already authenticates callers, use 
 
 See [Operator notes](SECURITY.md#operator-notes-network-exposure) for the deployment caveats.
 
+In [SSO (oidc) mode](#sso-oidc-mode) the server authenticates every `/mcp` request itself (the OIDC login, or a verified ArgoCD token with `MCP_ALLOW_ARGOCD_TOKEN`), so a non-loopback bind needs neither `MCP_AUTH_TOKEN` nor `--allow-unauthenticated`; `MCP_AUTH_TOKEN` together with `AUTH_MODE=oidc` is refused (two bearer schemes on one header). The `MCP_PUBLIC_URL` host is always an accepted `Host`, so Host validation stays on behind an ingress without `--allowed-host-header`; Origin validation applies as everywhere (MCP clients and the OAuth exchange send no `Origin`; a browser-hosted MCP client would need `--allowed-origin`). A Kubernetes deployment must set `MCP_BIND_ADDRESS=0.0.0.0`, or the pod answers nobody but itself.
+
 ### Read Only Mode
 
 If you want to run the MCP Server in a ReadOnly mode to avoid resource or application modification, you should set the environment variable:
