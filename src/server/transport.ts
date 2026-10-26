@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { logger } from '../logging/logging.js';
 import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
+import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
@@ -22,6 +23,11 @@ import { makeSessionTokenProvider } from '../auth/sessionTokenProvider.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { HttpSessionManager } from './httpSessionManager.js';
+import {
+  applyListenerSecurity,
+  resolveListenerSecurity,
+  type ListenerSecurityOptions
+} from './security.js';
 
 // Load the base-URL -> token registry once at startup from the JSON file at
 // ARGOCD_TOKEN_REGISTRY_PATH. Shared across all connections; read-only after
@@ -39,16 +45,48 @@ export const connectStdioTransport = () => {
   server.connect(new StdioServerTransport());
 };
 
-export const connectSSETransport = (port: number) => {
+export type TransportOptions = ListenerSecurityOptions;
+
+// Liveness probe, registered before the security middleware: a kubelet probe
+// addresses the pod IP and carries no bearer token. Reports only that we are up.
+const registerHealthz = (app: express.Express) => {
+  app.get('/healthz', (_, res) => {
+    res.status(200).json({ status: 'ok' });
+  });
+};
+
+// Log the address actually bound, so an operator can see whether the listener is
+// loopback-only or exposed. Both handlers hang off events rather than
+// app.listen()'s callback, which Express invokes even when the bind fails, with
+// server.address() still null.
+const listen = (app: express.Express, bindAddress: string, port: number, label: string) => {
+  const server = app.listen(port, bindAddress);
+  server.on('listening', () => {
+    const { address, port: boundPort } = server.address() as AddressInfo;
+    logger.info(`${label} listening on ${address}:${boundPort}`);
+  });
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    logger.error(`${label} could not bind ${bindAddress}:${port}: ${err.code ?? err.message}`);
+    process.exit(1);
+  });
+  return server;
+};
+
+export const connectSSETransport = (options: TransportOptions) => {
+  const security = resolveListenerSecurity(options);
+  const { port } = options;
   const app = express();
+  registerHealthz(app);
+  applyListenerSecurity(app, security);
   const transports: { [sessionId: string]: SSEServerTransport } = {};
 
   app.get('/sse', async (req, res) => {
-    const server = createServer({
-      argocdBaseUrl: (req.headers['x-argocd-base-url'] as string) || '',
-      argocdApiToken: (req.headers['x-argocd-api-token'] as string) || '',
-      tokenRegistry
-    });
+    // Same credential requirement as the http transport. Without it the handler
+    // built an McpServer with empty credentials and held it until the socket
+    // closed, one per connection.
+    const credentials = resolveCredentials(req, res);
+    if (!credentials) return;
+    const server = createServer({ ...credentials, tokenRegistry });
 
     const transport = new SSEServerTransport('/messages', res);
     transports[transport.sessionId] = transport;
@@ -71,8 +109,7 @@ export const connectSSETransport = (port: number) => {
     }
   });
 
-  logger.info(`Connecting to SSE transport on port: ${port}`);
-  app.listen(port);
+  return listen(app, security.bindAddress, port, 'SSE transport');
 };
 
 // Resolve the session-level ArgoCD credentials from headers or env.
@@ -88,6 +125,10 @@ export const connectSSETransport = (port: number) => {
 //
 // The base URL is optional at this level: when it is absent, callers may supply
 // it per call via the argocdBaseUrl tool argument.
+//
+// These are outbound credentials only. Inbound authorization is the listener's
+// job (MCP_AUTH_TOKEN in token mode, the OIDC login or a verified ArgoCD token
+// in oidc mode; see security.ts and the oidc branch of connectHttpTransport).
 const resolveCredentials = (
   req: express.Request,
   res: express.Response
@@ -150,21 +191,9 @@ export const resolveHttpSessionOptions = (env: NodeJS.ProcessEnv = process.env) 
   };
 };
 
-export const connectHttpTransport = async (port: number, stateless = false) => {
-  const app = express();
-  // Trust the ingress/proxy chain so forwarded client IPs are honored and the
-  // OAuth router's rate limiter can key on the real client rather than throwing.
-  app.set('trust proxy', resolveTrustProxy());
-  app.use(express.json());
-
-  app.get('/healthz', (_, res) => {
-    res.status(200).json({ status: 'ok' });
-  });
-
-  // Tracks live stateful sessions, reaps idle ones, and caps concurrency so an
-  // abandoned or abusive client cannot grow the heap without bound. Unused in
-  // stateless mode (transports are per-request and closed on response end).
-  const sessions = new HttpSessionManager(resolveHttpSessionOptions());
+export const connectHttpTransport = async (options: TransportOptions & { stateless?: boolean }) => {
+  const { port, stateless = false } = options;
+  const authMode = resolveAuthMode();
 
   // ArgoCD token passthrough (MCP_ALLOW_ARGOCD_TOKEN) sits beside the OIDC
   // login; off means the OIDC bearer is the only way in. Resolved before the
@@ -172,8 +201,48 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
   // say, rather than being ignored.
   const allowArgocdToken = resolveAllowArgocdToken();
 
-  if (resolveAuthMode() === 'oidc') {
-    const config = loadOidcConfig();
+  // oidc mode authenticates every /mcp request itself (the OIDC bearer or a
+  // verified ArgoCD token), so the listener may bind past loopback without
+  // MCP_AUTH_TOKEN; a second bearer scheme on the same header would only be
+  // ambiguous, so that variable is refused here. The public hostname is always
+  // an accepted Host, which keeps Host validation on behind the ingress.
+  const oidcConfig = authMode === 'oidc' ? loadOidcConfig() : undefined;
+  if (oidcConfig && options.authToken !== undefined) {
+    throw new Error(
+      'MCP_AUTH_TOKEN cannot be combined with AUTH_MODE=oidc: the OIDC login (and ' +
+        'MCP_ALLOW_ARGOCD_TOKEN) already authenticate every request.'
+    );
+  }
+  const security = resolveListenerSecurity(
+    oidcConfig
+      ? {
+          ...options,
+          authenticatedByApp: true,
+          allowedHostHeaders: [
+            ...(options.allowedHostHeaders ?? []),
+            new URL(oidcConfig.publicUrl).host
+          ]
+        }
+      : options
+  );
+
+  const app = express();
+  // Trust the ingress/proxy chain so forwarded client IPs are honored and the
+  // OAuth router's rate limiter can key on the real client rather than throwing.
+  app.set('trust proxy', resolveTrustProxy());
+  registerHealthz(app);
+  applyListenerSecurity(app, security);
+  // After the security middleware, so malformed JSON returns 401/403 rather than
+  // the body parser's 400, which would tell a caller it passed the credential check.
+  app.use(express.json());
+
+  // Tracks live stateful sessions, reaps idle ones, and caps concurrency so an
+  // abandoned or abusive client cannot grow the heap without bound. Unused in
+  // stateless mode (transports are per-request and closed on response end).
+  const sessions = new HttpSessionManager(resolveHttpSessionOptions());
+
+  if (oidcConfig) {
+    const config = oidcConfig;
     logger.info(
       { clientMode: config.mode, clientId: config.clientId },
       'OIDC client mode resolved'
@@ -275,11 +344,10 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
     });
 
     logger.info(
-      { port, argocdBaseUrl: config.argocdBaseUrl, tokenStore: config.tokenStore },
-      `Connecting to Http Stream transport on port: ${port} (oidc auth mode)`
+      { argocdBaseUrl: config.argocdBaseUrl, tokenStore: config.tokenStore },
+      'Http Stream transport starting (oidc auth mode)'
     );
-    app.listen(port);
-    return;
+    return listen(app, security.bindAddress, port, 'Http Stream transport (oidc auth mode)');
   }
 
   // ---- token mode (existing behavior) ----
@@ -362,8 +430,10 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
   app.get('/mcp', handleSessionRequest);
   app.delete('/mcp', handleSessionRequest);
 
-  logger.info(
-    `Connecting to Http Stream transport on port: ${port}${stateless ? ' (stateless mode)' : ''}`
+  return listen(
+    app,
+    security.bindAddress,
+    port,
+    `Http Stream transport${stateless ? ' (stateless mode)' : ''}`
   );
-  app.listen(port);
 };
