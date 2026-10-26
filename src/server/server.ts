@@ -11,6 +11,7 @@ import {
 } from '../shared/models/schema.js';
 import { TokenRegistry, tokenRegistryFromEnv } from './tokenRegistry.js';
 import { type TokenSource } from '../argocd/http.js';
+import { logger } from '../logging/logging.js';
 
 type ServerInfo = {
   argocdBaseUrl: string;
@@ -25,6 +26,10 @@ type ServerInfo = {
   // When set (oidc mode), build the ArgoCD client with this refreshable
   // bearer-token source instead of the static argocdApiToken string.
   tokenSource?: TokenSource;
+  // When set, every tool call is logged with it (passthrough sessions:
+  // "argocd:<account>" or "argocd-token:<fingerprint>"). Unset for OIDC
+  // logins, so nothing is logged about people here.
+  principal?: string;
 };
 
 // Per-call argument that any tool may accept to target a specific ArgoCD
@@ -106,9 +111,10 @@ export class Server extends McpServer {
   private defaultApiToken: string;
   private tokenRegistry: TokenRegistry;
   private argocdClient: ArgoCDClient;
-  // See ServerInfo.pinBaseUrl / ServerInfo.tokenSource.
+  // See ServerInfo.pinBaseUrl / ServerInfo.tokenSource / ServerInfo.principal.
   private pinBaseUrl: boolean;
   private tokenSource: TokenSource;
+  private principal?: string;
   // Cache per-credential clients to avoid rebuilding the HttpClient on every
   // call. Keyed by baseUrl + token, since the same base URL may resolve to
   // different tokens (request token vs. registry token vs. default).
@@ -125,6 +131,7 @@ export class Server extends McpServer {
     this.tokenRegistry = serverInfo.tokenRegistry ?? tokenRegistryFromEnv();
     this.pinBaseUrl = serverInfo.pinBaseUrl ?? false;
     this.tokenSource = serverInfo.tokenSource ?? serverInfo.argocdApiToken;
+    this.principal = serverInfo.principal;
     this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, this.tokenSource);
 
     const isReadOnly =
@@ -651,6 +658,13 @@ export class Server extends McpServer {
     ) => T
   ) {
     const mergedSchema = { ...paramsSchema, ...argoCDArgsSchema } as ZodRawShape;
+    // One line per call for sessions that carry a principal: who, which tool,
+    // and whether it succeeded. Never the arguments or the result.
+    const logCall = (outcome: 'ok' | 'error') => {
+      if (this.principal) {
+        logger.info({ principal: this.principal, tool: name, outcome }, 'Tool call');
+      }
+    };
     this.tool(name, description, mergedSchema, async (...args) => {
       try {
         const [allArgs, extra] = args as [
@@ -666,11 +680,13 @@ export class Server extends McpServer {
           client,
           extra
         );
+        logCall('ok');
         return {
           isError: false,
           content: [{ type: 'text', text: JSON.stringify(result) }]
         };
       } catch (error) {
+        logCall('error');
         return {
           isError: true,
           content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }]

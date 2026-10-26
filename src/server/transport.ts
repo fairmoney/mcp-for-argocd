@@ -8,6 +8,12 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
 import { resolveAuthMode, loadOidcConfig } from '../auth/config.js';
+import {
+  createAuthDispatcher,
+  createPassthroughMiddleware,
+  resolveAllowArgocdToken
+} from '../auth/argocdTokenPassthrough.js';
+import { createOidcMcpHandler } from './oidcMcpHandler.js';
 import { discoverOidc, SSONotConfiguredError } from '../auth/oidcDiscovery.js';
 import type { OidcProviderMetadata } from '../auth/types.js';
 import { createTokenStore } from '../auth/tokenStoreFactory.js';
@@ -160,12 +166,21 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
   // stateless mode (transports are per-request and closed on response end).
   const sessions = new HttpSessionManager(resolveHttpSessionOptions());
 
+  // ArgoCD token passthrough (MCP_ALLOW_ARGOCD_TOKEN) sits beside the OIDC
+  // login; off means the OIDC bearer is the only way in. Resolved before the
+  // mode check so that setting it in token mode refuses to start, as the docs
+  // say, rather than being ignored.
+  const allowArgocdToken = resolveAllowArgocdToken();
+
   if (resolveAuthMode() === 'oidc') {
     const config = loadOidcConfig();
     logger.info(
       { clientMode: config.mode, clientId: config.clientId },
       'OIDC client mode resolved'
     );
+    if (allowArgocdToken) {
+      logger.info('ArgoCD token passthrough enabled (x-argocd-api-token)');
+    }
     const store = createTokenStore(config);
 
     // Resolve OIDC discovery ONCE at startup and fail closed. Starting the
@@ -227,87 +242,30 @@ export const connectHttpTransport = async (port: number, stateless = false) => {
       }
     });
 
-    const bearerAuth = requireBearerAuth({ verifier: provider });
-
-    app.post('/mcp', bearerAuth, async (req, res) => {
-      try {
-        const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
-        let transport: StreamableHTTPServerTransport;
-
-        const existing =
-          !stateless && sessionIdFromHeader ? sessions.get(sessionIdFromHeader) : undefined;
-        if (existing) {
-          transport = existing as StreamableHTTPServerTransport;
-        } else if (stateless || (!sessionIdFromHeader && isInitializeRequest(req.body))) {
-          if (!stateless && !sessions.hasCapacity()) {
-            res.status(503).json({
-              jsonrpc: '2.0',
-              error: { code: -32000, message: 'Server at session capacity; try again later.' },
-              id: req.body?.id ?? null
-            });
-            return;
-          }
-          const opaque = req.auth!.token; // set by requireBearerAuth
-          const tokenSource = makeSessionTokenProvider(store, meta, config, opaque);
-
-          transport = new StreamableHTTPServerTransport(
-            stateless
-              ? { sessionIdGenerator: undefined }
-              : {
-                  sessionIdGenerator: () => randomUUID(),
-                  onsessioninitialized: (id) => {
-                    sessions.add(id, transport, server);
-                  }
-                }
-          );
-          if (!stateless) {
-            transport.onclose = () => {
-              if (transport.sessionId) sessions.forget(transport.sessionId);
-            };
-          }
-
-          const server = createServer({
-            argocdBaseUrl: config.argocdBaseUrl,
-            argocdApiToken: '',
-            pinBaseUrl: true,
-            tokenSource
-          });
-          // Stateless: nothing tracks this transport/server, so close both when
-          // the response ends or the client disconnects — otherwise each request
-          // leaks a full McpServer until GC.
-          if (stateless) {
-            res.on('close', () => {
-              void transport.close();
-              void server.close();
-            });
-          }
-          await server.connect(transport);
-        } else {
-          const errorMsg = sessionIdFromHeader
-            ? `Invalid or expired session ID: ${sessionIdFromHeader}`
-            : 'Bad Request: Not an initialization request and no valid session ID provided.';
-          res.status(400).json({
-            jsonrpc: '2.0',
-            error: { code: -32000, message: errorMsg },
-            id: req.body?.id !== undefined ? req.body.id : null
-          });
-          return;
-        }
-        await transport.handleRequest(req, res, req.body);
-      } catch (error) {
-        logger.error(
-          { error: error instanceof Error ? error.message : String(error) },
-          'oidc /mcp request handler failed'
-        );
-        if (!res.headersSent) {
-          res.status(500).json({
-            jsonrpc: '2.0',
-            error: { code: -32603, message: 'Internal error' },
-            id: req.body?.id ?? null
-          });
-        }
-      }
+    // One dispatcher decides per request: a forwarded ArgoCD token goes to
+    // the passthrough middleware, everything else to the SDK's bearer check.
+    const authenticate = createAuthDispatcher({
+      allowArgocdToken,
+      passthrough: createPassthroughMiddleware({
+        allowArgocdToken,
+        argocdBaseUrl: config.argocdBaseUrl,
+        stateless
+      }),
+      bearerAuth: requireBearerAuth({ verifier: provider })
     });
+
+    app.post(
+      '/mcp',
+      authenticate,
+      createOidcMcpHandler({
+        sessions,
+        stateless,
+        argocdBaseUrl: config.argocdBaseUrl,
+        oidcProviderFor: (opaque) => makeSessionTokenProvider(store, meta, config, opaque),
+        createTransport: (opts) => new StreamableHTTPServerTransport(opts),
+        createServer
+      })
+    );
 
     app.get('/mcp', (_req, res) => {
       res.status(405).send('Method Not Allowed');

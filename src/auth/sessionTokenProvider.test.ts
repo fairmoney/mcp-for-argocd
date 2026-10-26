@@ -6,6 +6,7 @@ import type { OidcConfig } from './config.js';
 import type { OidcProviderMetadata } from './types.js';
 
 const CONFIG: OidcConfig = {
+  mode: 'explicit',
   publicUrl: 'https://mcp.example.com',
   argocdBaseUrl: 'https://argocd.example.com',
   clientId: 'argocd-mcp',
