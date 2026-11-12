@@ -10,7 +10,10 @@ import type {
   OAuthTokens
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { randomBytes } from 'node:crypto';
-import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import {
+  InvalidGrantError,
+  InvalidTokenError
+} from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { OidcConfig } from './config.js';
 import type { OidcProviderMetadata } from './types.js';
 import type { TokenStore } from './tokenStore.js';
@@ -20,7 +23,9 @@ import {
   generateOpaqueToken,
   generatePkce,
   generateState,
-  refreshUpstream
+  describeTokenError,
+  refreshUpstream,
+  UpstreamTokenError
 } from './oauth.js';
 import { logger } from '../logging/logging.js';
 
@@ -209,21 +214,68 @@ export class OAuthProxyProvider implements OAuthServerProvider {
     client: OAuthClientInformationFull,
     refreshToken: string
   ): Promise<OAuthTokens> {
+    // A refresh that can never succeed is invalid_grant (400): it is the one
+    // answer that tells an MCP client to drop its refresh token and run the
+    // sign-in again. A plain Error would reach the client as a 500, which it
+    // treats as a server fault and keeps retrying.
     const record = await this.store.getRefreshToken(refreshToken);
-    if (!record) throw new Error('Unknown or expired refresh token');
+    if (!record) {
+      logger.warn({ reason: 'unknown refresh token' }, 'Client token refresh rejected');
+      throw new InvalidGrantError('Unknown or expired refresh token');
+    }
     const session = await this.store.getSession(record.sessionId);
-    if (!session) throw new Error('No upstream refresh token available for this session');
+    if (!session) {
+      logger.warn({ reason: 'no upstream refresh token' }, 'Client token refresh rejected');
+      throw new InvalidGrantError('No upstream refresh token available for this session');
+    }
     const meta = await this.meta();
 
-    const upstream = await refreshUpstream(
-      meta,
-      {
-        clientId: this.config.clientId,
-        clientSecret: this.config.clientSecret,
-        refreshToken: session.upstreamRefreshToken
-      },
-      this.fetchImpl
-    );
+    const attempt = (upstreamRefreshToken: string) =>
+      refreshUpstream(
+        meta,
+        {
+          clientId: this.config.clientId,
+          clientSecret: this.config.clientSecret,
+          refreshToken: upstreamRefreshToken
+        },
+        this.fetchImpl
+      );
+
+    let upstream;
+    let presented = session.upstreamRefreshToken;
+    try {
+      try {
+        upstream = await attempt(presented);
+      } catch (error) {
+        if (!(error instanceof UpstreamTokenError && error.grantRejected)) throw error;
+        const now = await this.store.getSession(record.sessionId);
+        if (!now || now.upstreamRefreshToken === presented) throw error;
+        // Another path rotated the upstream token while this request was at
+        // Dex: the login is alive, so retry once with the rotated token
+        // rather than sending the client back through the sign-in.
+        presented = now.upstreamRefreshToken;
+        upstream = await attempt(presented);
+      }
+    } catch (error) {
+      const reason = describeTokenError(error);
+      if (error instanceof UpstreamTokenError && error.grantRejected) {
+        await this.store.deleteRefreshToken(refreshToken);
+        const now = await this.store.getSession(record.sessionId);
+        if (now && now.upstreamRefreshToken !== presented) {
+          // Rotated again meanwhile: only this request lost; keep the login.
+          logger.warn({ reason }, 'Client token refresh lost a rotation race');
+          throw new InvalidGrantError('Refresh token already used');
+        }
+        // Dex no longer knows this login (e.g. it restarted and lost its
+        // in-memory refresh tokens): end it so no path keeps trying it.
+        await this.store.deleteSession(record.sessionId);
+        logger.warn({ reason }, 'Client token refresh rejected upstream; login ended');
+        throw new InvalidGrantError('The upstream login can no longer be renewed');
+      }
+      // Transient: leave everything in place so the client can retry.
+      logger.warn({ reason }, 'Client token refresh failed');
+      throw error;
+    }
 
     // Persist Dex's rotated refresh token in the shared session record so the
     // server-side path (sessionTokenProvider) picks it up instead of a stale one.
@@ -272,6 +324,13 @@ export class OAuthProxyProvider implements OAuthServerProvider {
     // mapped to 500, which stops clients from re-authenticating).
     if (!stored) {
       logger.warn({ reason: 'opaque token not in store' }, 'Bearer token rejected');
+      throw new InvalidTokenError('Invalid or expired access token');
+    }
+    // A renewable login whose session record is gone was revoked (its upstream
+    // token can no longer be renewed); every access token issued for it is
+    // dead, not only the one the revoking path held.
+    if (stored.upstream.refreshToken && !(await this.store.getSession(stored.sessionId))) {
+      logger.warn({ reason: 'login revoked' }, 'Bearer token rejected');
       throw new InvalidTokenError('Invalid or expired access token');
     }
     return {

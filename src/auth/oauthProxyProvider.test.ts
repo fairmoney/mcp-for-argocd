@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { mock, test } from 'node:test';
 import type { Response as ExpressResponse } from 'express';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
-import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import {
+  InvalidGrantError,
+  InvalidTokenError
+} from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { OAuthProxyProvider } from './oauthProxyProvider.js';
 import { InMemoryTokenStore } from './inMemoryTokenStore.js';
 import { makeSessionTokenProvider } from './sessionTokenProvider.js';
@@ -251,4 +254,173 @@ test('desync regression: server-side refresh uses the rotated token from the sha
   // rotated token — not the original R1.
   assert.equal(jwt, 'UPSTREAM_JWT_3');
   assert.deepEqual(presented, ['R1', 'R2']);
+});
+
+// A failed client-facing refresh must answer invalid_grant (400), not a plain
+// error the SDK turns into a 500: only invalid_grant tells an MCP client to
+// drop its refresh token and run the sign-in again.
+const isInvalidGrant = (error: unknown) => {
+  assert.ok(error instanceof InvalidGrantError, `got ${String(error)}`);
+  return true;
+};
+
+test('exchangeRefreshToken: an unknown refresh token is invalid_grant', async (t) => {
+  const { store, provider } = makeProvider();
+  t.after(() => store.dispose());
+  await assert.rejects(() => provider.exchangeRefreshToken(client, 'bogus'), isInvalidGrant);
+});
+
+test('exchangeRefreshToken: a refresh token without a session is invalid_grant', async (t) => {
+  const { store, provider } = makeProvider();
+  t.after(() => store.dispose());
+  await store.putRefreshToken('opaque-r', { clientId: client.client_id, sessionId: 'gone' });
+  await assert.rejects(() => provider.exchangeRefreshToken(client, 'opaque-r'), isInvalidGrant);
+});
+
+test('exchangeRefreshToken: Dex rejecting the grant is invalid_grant and ends the session', async (t) => {
+  const store = new InMemoryTokenStore();
+  t.after(() => store.dispose());
+  const { fetchImpl } = makeRotatingDex();
+  const provider = new OAuthProxyProvider({
+    config: CONFIG,
+    store,
+    discover: async () => META,
+    fetchImpl
+  });
+  const tokens = await establishSession(provider);
+  const record = await store.getRefreshToken(tokens.refresh_token!);
+  // Dex has moved on (e.g. it restarted and lost its refresh tokens).
+  await store.putSession(record!.sessionId, {
+    upstreamRefreshToken: 'R-unknown-to-dex',
+    clientId: client.client_id
+  });
+
+  await assert.rejects(
+    () => provider.exchangeRefreshToken(client, tokens.refresh_token!),
+    isInvalidGrant
+  );
+  assert.equal(await store.getSession(record!.sessionId), undefined);
+});
+
+test('exchangeRefreshToken: a Dex outage is not invalid_grant and keeps the session', async (t) => {
+  const store = new InMemoryTokenStore();
+  t.after(() => store.dispose());
+  const { fetchImpl: rotating } = makeRotatingDex();
+  let down = false;
+  const fetchImpl = (async (input: string | URL, init?: RequestInit) =>
+    down ? new Response('down', { status: 503 }) : rotating(input, init)) as typeof fetch;
+  const provider = new OAuthProxyProvider({
+    config: CONFIG,
+    store,
+    discover: async () => META,
+    fetchImpl
+  });
+  const tokens = await establishSession(provider);
+  const record = await store.getRefreshToken(tokens.refresh_token!);
+  down = true;
+
+  await assert.rejects(
+    () => provider.exchangeRefreshToken(client, tokens.refresh_token!),
+    (error: unknown) => {
+      assert.ok(!(error instanceof InvalidGrantError));
+      return true;
+    }
+  );
+  assert.ok(await store.getSession(record!.sessionId));
+  assert.ok(await store.getRefreshToken(tokens.refresh_token!), 'the client may retry');
+});
+
+// The revoking path only holds the access token its HTTP session started
+// with; a client that refreshed holds a newer one, which must die too.
+test('verifyAccessToken refuses every access token of a revoked login', async (t) => {
+  const store = new InMemoryTokenStore();
+  t.after(() => store.dispose());
+  const { fetchImpl } = makeRotatingDex();
+  const provider = new OAuthProxyProvider({
+    config: CONFIG,
+    store,
+    discover: async () => META,
+    fetchImpl
+  });
+  const first = await establishSession(provider);
+  const second = await provider.exchangeRefreshToken(client, first.refresh_token!);
+  const { sessionId } = (await store.getRefreshToken(second.refresh_token!))!;
+  await provider.verifyAccessToken(second.access_token);
+
+  await store.deleteSession(sessionId);
+
+  for (const token of [first.access_token, second.access_token]) {
+    await assert.rejects(
+      () => provider.verifyAccessToken(token),
+      (error: unknown) => error instanceof InvalidTokenError
+    );
+  }
+});
+
+// A server-side refresh rotates R1 while the client is presenting R1 itself:
+// Dex refuses the stale token, but the login is alive, so the client must get
+// fresh tokens (via one retry with the rotated token), not a forced sign-in.
+test('exchangeRefreshToken: losing a rotation race retries with the rotated token', async (t) => {
+  const store = new InMemoryTokenStore();
+  t.after(() => store.dispose());
+  const { fetchImpl: rotating } = makeRotatingDex();
+  const race: { sessionId?: string } = {};
+  const presented: string[] = [];
+  const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
+    const token = new URLSearchParams((init?.body as string) ?? '').get('refresh_token');
+    if (race.sessionId && token) {
+      presented.push(token);
+      if (token === 'R1') {
+        // Another path wins the rotation while this request is at Dex.
+        await store.putSession(race.sessionId, {
+          upstreamRefreshToken: 'R-rotated',
+          clientId: client.client_id
+        });
+        return new Response(JSON.stringify({ error: 'invalid_request' }), { status: 400 });
+      }
+      return new Response(
+        JSON.stringify({ access_token: 'JWT_OK', refresh_token: 'R-next', expires_in: 300 }),
+        { status: 200 }
+      );
+    }
+    return rotating(input, init);
+  }) as typeof fetch;
+  const provider = new OAuthProxyProvider({
+    config: CONFIG,
+    store,
+    discover: async () => META,
+    fetchImpl
+  });
+  const tokens = await establishSession(provider);
+  race.sessionId = (await store.getRefreshToken(tokens.refresh_token!))!.sessionId;
+
+  const next = await provider.exchangeRefreshToken(client, tokens.refresh_token!);
+
+  assert.deepEqual(presented, ['R1', 'R-rotated']);
+  assert.equal((await store.getSession(race.sessionId))?.upstreamRefreshToken, 'R-next');
+  await provider.verifyAccessToken(next.access_token);
+});
+
+// Our Dex uses a SAML connector, which issues no refresh token: such a login
+// never has a session record and must still be accepted.
+test('verifyAccessToken accepts a login that has no refresh token', async (t) => {
+  const store = new InMemoryTokenStore();
+  t.after(() => store.dispose());
+  const samlDex = (async () =>
+    new Response(
+      JSON.stringify({ access_token: 'SAML_JWT', token_type: 'Bearer', expires_in: 300 }),
+      { status: 200 }
+    )) as unknown as typeof fetch;
+  const provider = new OAuthProxyProvider({
+    config: CONFIG,
+    store,
+    discover: async () => META,
+    fetchImpl: samlDex
+  });
+
+  const tokens = await establishSession(provider);
+
+  assert.equal(tokens.refresh_token, undefined);
+  const info = await provider.verifyAccessToken(tokens.access_token);
+  assert.equal(info.extra?.argocdToken, 'SAML_JWT');
 });
