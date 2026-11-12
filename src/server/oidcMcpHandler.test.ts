@@ -217,7 +217,8 @@ test('another principal presenting the session id is told there is no such sessi
   for (const intruder of [tokenAuth('other'), oidcAuth('login-1')]) {
     const { res, out } = makeRes();
     await h.handler(makeReq(intruder, CALL, 'sid-1'), res);
-    assert.equal(out.status, 400);
+    // The same answer as for an expired id, so a foreign id reveals nothing.
+    assert.equal(out.status, 404);
     assert.match(
       (out.json as { error: { message: string } }).error.message,
       /Invalid or expired session ID/
@@ -225,6 +226,37 @@ test('another principal presenting the session id is told there is no such sessi
   }
   assert.deepEqual(h.transports[0].handled, [INIT], 'the session never saw the intruders');
   assert.equal(h.servers.length, 1);
+});
+
+// The MCP spec: a request for a session the server no longer has is a 404,
+// and a client MUST answer a 404 by starting a new session. A 400 leaves the
+// client stuck on the dead id after an idle timeout or a pod restart.
+test('a session id the server no longer has is a 404, so the client re-initializes', async () => {
+  const h = makeHarness();
+  await h.handler(makeReq(oidcAuth('login-1'), INIT), makeRes().res);
+  h.sessions.forget('sid-1');
+  const { res, out } = makeRes();
+
+  await h.handler(makeReq(oidcAuth('login-1'), CALL, 'sid-1'), res);
+
+  assert.equal(out.status, 404);
+  assert.match(
+    (out.json as { error: { message: string } }).error.message,
+    /Invalid or expired session ID/
+  );
+  assert.equal(h.servers.length, 1, 'no server built for the dead id');
+});
+
+// Spec: after a 404 the client starts over WITHOUT a session id; an
+// initialize that still carries the dead id is not a new session.
+test('an initialize carrying a session id the server does not hold is a 404', async () => {
+  const h = makeHarness();
+  const { res, out } = makeRes();
+
+  await h.handler(makeReq(oidcAuth('login-1'), INIT, 'sid-gone'), res);
+
+  assert.equal(out.status, 404);
+  assert.equal(h.servers.length, 0);
 });
 
 test('OIDC initialize: server built with the refreshable provider, no principal, owned by the login', async () => {

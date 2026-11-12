@@ -51,6 +51,63 @@ const toUpstreamToken = (r: TokenResponse): UpstreamToken => ({
   expiresAtMs: Date.now() + (r.expires_in ?? DEFAULT_UPSTREAM_TTL_SEC) * 1000
 });
 
+const MAX_DESCRIPTION = 160;
+
+// The token endpoint refused a request. Dex answers a refresh token it no
+// longer knows (unknown, already rotated, expired, or lost in a Dex restart)
+// with 400 invalid_request, and a client mismatch with 400 invalid_grant:
+// those mean the login cannot be renewed. Everything else (401
+// invalid_client from a wrong client secret, 5xx, an unreadable body) is a
+// configuration fault or transient, and must not end anyone's login.
+//
+// The message carries only the status and the OAuth error code, because it
+// can reach the MCP client as a tool error. Dex's free-text description is
+// kept apart, for logs.
+export class UpstreamTokenError extends Error {
+  public readonly description?: string;
+
+  constructor(
+    public readonly status: number,
+    public readonly oauthError?: string,
+    description?: string
+  ) {
+    super(`Upstream token endpoint returned ${status}` + (oauthError ? `: ${oauthError}` : ''));
+    this.name = 'UpstreamTokenError';
+    this.description =
+      description && description.length > MAX_DESCRIPTION
+        ? `${description.slice(0, MAX_DESCRIPTION)}...`
+        : description;
+  }
+
+  get grantRejected(): boolean {
+    return (
+      this.status === 400 &&
+      (this.oauthError === 'invalid_request' || this.oauthError === 'invalid_grant')
+    );
+  }
+}
+
+// What to log about a failed token request: the message plus Dex's reason.
+export const describeTokenError = (error: unknown): string => {
+  if (error instanceof UpstreamTokenError) {
+    return error.description ? `${error.message} (${error.description})` : error.message;
+  }
+  return error instanceof Error ? error.message : String(error);
+};
+
+// Only the RFC 6749 error fields are read from the body; they carry no token.
+const readOAuthError = async (res: Response): Promise<{ error?: string; description?: string }> => {
+  try {
+    const body = (await res.json()) as { error?: unknown; error_description?: unknown };
+    return {
+      error: typeof body.error === 'string' ? body.error : undefined,
+      description: typeof body.error_description === 'string' ? body.error_description : undefined
+    };
+  } catch {
+    return {};
+  }
+};
+
 const postToken = async (
   meta: OidcProviderMetadata,
   params: URLSearchParams,
@@ -62,7 +119,8 @@ const postToken = async (
     body: params.toString()
   });
   if (!res.ok) {
-    throw new Error(`Upstream token endpoint returned ${res.status}`);
+    const { error, description } = await readOAuthError(res);
+    throw new UpstreamTokenError(res.status, error, description);
   }
   return toUpstreamToken((await res.json()) as TokenResponse);
 };

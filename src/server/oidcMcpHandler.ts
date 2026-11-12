@@ -66,12 +66,22 @@ export const createOidcMcpHandler = (deps: OidcMcpHandlerDeps) => {
       }
 
       if (!(stateless || (!sessionIdFromHeader && isInitializeRequest(req.body)))) {
+        // A session id we do not hold (idle-closed, lost in a restart, or
+        // someone else's) is a 404: the MCP spec requires a client to answer
+        // a 404 by starting a new session, where a 400 leaves it stuck.
+        if (sessionIdFromHeader) {
+          jsonRpcError(
+            res,
+            404,
+            `Invalid or expired session ID: ${sessionIdFromHeader}`,
+            req.body?.id
+          );
+          return;
+        }
         jsonRpcError(
           res,
           400,
-          sessionIdFromHeader
-            ? `Invalid or expired session ID: ${sessionIdFromHeader}`
-            : 'Bad Request: Not an initialization request and no valid session ID provided.',
+          'Bad Request: Not an initialization request and no valid session ID provided.',
           req.body?.id
         );
         return;
